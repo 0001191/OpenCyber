@@ -353,3 +353,138 @@ p = process('./challenge')
 # 交互
 p.interactive()
 ```
+
+---
+
+## 💾 数据库操作指南
+
+每次分析过程中必须记录操作轨迹到 SQLite 数据库，所有记录要求**真实可复核**。
+
+### 数据库初始化
+
+```bash
+# 首次使用前初始化
+sqlite3 opencyber.db < db/schema.sql
+
+# 或者用脚本
+bash scripts/init-db.sh
+```
+
+### 记录操作
+
+所有阶段中都穿插这些记录操作：
+
+```bash
+# ── 1. 创建分析任务（开始分析前） ──
+TASK_ID=$(sqlite3 opencyber.db "INSERT INTO tasks(sample_id,status,started_at) VALUES($SAMPLE_ID,'running',datetime('now')); SELECT last_insert_rowid();")
+echo "TASK_ID=$TASK_ID"
+
+# ── 2. 记录工具调用（每次调完工具后） ──
+sqlite3 opencyber.db "INSERT INTO tool_calls(task_id,tool_name,parameters,output,success,duration_ms) VALUES($TASK_ID,'$TOOL','$PARAMS','$OUTPUT',$SUCCESS,$DURATION);"
+
+# ── 3. 记录观察/发现（分析过程中） ──
+sqlite3 opencyber.db "INSERT INTO observations(task_id,content,category,confidence) VALUES($TASK_ID,'发现可疑字符串 flag{...}','string',0.8);"
+
+# ── 4. 写入 Agent 记忆（关键线索/失败路径） ──
+sqlite3 opencyber.db "INSERT INTO agent_memory(task_id,memory_type,content,is_key_insight) VALUES($TASK_ID,'semantic','UPX加壳 → 先脱壳再分析',1);"
+
+# ── 5. 跨任务读取历史记忆（分析开始前做） ──
+sqlite3 opencyber.db "SELECT content FROM agent_memory WHERE is_key_insight=1 ORDER BY created_at DESC LIMIT 5;"
+
+# ── 6. 保存最终结果（拿到 flag 后） ──
+sqlite3 opencyber.db "INSERT INTO results(task_id,flag,flag_format,conclusion,evidence,confidence) VALUES($TASK_ID,'flag{xxx}',1,'通过 XOR 解密得到 flag','分析过程和截图证据',0.95);"
+
+# ── 7. 更新任务状态（分析结束时） ──
+sqlite3 opencyber.db "UPDATE tasks SET status='$STATUS',result='$RESULT',finished_at=datetime('now'),duration_ms=$DURATION WHERE id=$TASK_ID;"
+
+# ── 8. 评测统计（从数据库读回汇总——这就是"不只写还要读"） ──
+sqlite3 opencyber.db "SELECT difficulty,COUNT(*) as total,SUM(CASE WHEN t.result='success' THEN 1 ELSE 0 END) as solved,ROUND(AVG(CASE WHEN t.result='success' THEN 1.0 ELSE 0.0 END)*100,2) as rate FROM tasks t JOIN samples s ON t.sample_id=s.id GROUP BY s.difficulty;"
+```
+
+### 什么时候记录什么
+
+| 时机 | 要记录的表 | 记什么 |
+|------|-----------|--------|
+| 拿到样本时 | `samples` | 文件名、路径、类型、架构、位数 |
+| 开始分析时 | `tasks` | 创建任务，状态设为 running |
+| 调完每个工具 | `tool_calls` | 工具名、参数、输出、耗时 |
+| 有发现时 | `observations` | 发现了什么、类别、置信度 |
+| 重要线索/失败 | `agent_memory` | 记忆内容，标注是否关键 |
+| 拿到 flag 时 | `results` | flag、结论、证据 |
+| 分析结束时 | `tasks` | 更新状态为 success/failed |
+| 批量跑完后 | `evaluation_stats` | 从 tasks + samples 读回汇总各难度成功率 |
+
+---
+
+## 🌐 CTFd 平台对接
+
+验收时需要自动对接 CTFd 平台：登录 → 列题 → 下载附件 → 提交 flag。
+
+### API 操作
+
+```bash
+# CTFd 地址和账号（用户提供）
+CTFD_URL="http://192.168.x.x:8000"
+CTFD_USER="your_team_name"
+CTFD_PASS="your_password"
+
+# 1. 登录获取 Token
+TOKEN=$(curl -s -X POST "$CTFD_URL/api/v1/users/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"$CTFD_USER\",\"password\":\"$CTFD_PASS\"}" | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])" 2>/dev/null)
+
+# 2. 列出所有题目
+curl -s -H "Authorization: Bearer $TOKEN" "$CTFD_URL/api/v1/challenges" | \
+  python3 -c "
+import sys,json
+data = json.load(sys.stdin)['data']
+for c in data:
+    print(f\"ID:{c['id']}  {c['name']}  [{c['category']}]  {c['value']}pts\")
+"
+
+# 3. 查看单题详情（获取附件信息）
+CHAL_ID=1
+curl -s -H "Authorization: Bearer $TOKEN" "$CTFD_URL/api/v1/challenges/$CHAL_ID" | \
+  python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print(json.dumps(d,indent=2))" 2>/dev/null
+
+# 4. 下载附件
+curl -s -OJ -H "Authorization: Bearer $TOKEN" "$CTFD_URL/api/v1/challenges/$CHAL_ID/files"
+# 如果上一步返回文件列表，拼接 URL 下载
+curl -s -OJ -H "Authorization: Bearer $TOKEN" "$CTFD_URL$FILE_URL"
+
+# 5. 提交 flag
+SUBMIT_FLAG="flag{xxx}"
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"challenge_id\":$CHAL_ID,\"submission\":\"$SUBMIT_FLAG\"}" \
+  "$CTFD_URL/api/v1/challenges/attempt" | \
+  python3 -c "import sys,json; r=json.load(sys.stdin); print(r['data']['message'])"
+```
+
+### 对接流程
+
+当用户说"帮我从 CTFd 上做题"时，按以下顺序执行：
+
+```
+1. 向用户询问 CTFd 地址、用户名、密码
+2. 登录 → 获取 Token（记录到数据库 tool_calls）
+3. 列题 → 展示给用户看，让用户选择要做哪道
+4. 下载题目附件到本地（记录到 samples 表）
+5. 执行 4 阶段分析流程
+6. 拿到 flag 后自动提交到 CTFd（记录到 results 表）
+7. 输出结果
+```
+
+### 评测比赛模式
+
+当进入验收评测环节时，自动批量模式：
+
+```
+1. 登录 CTFd
+2. 列出所有题目
+3. 按难度分组（基础/中等/挑战）
+4. 逐个下载并分析
+5. 每解出一道立即提交
+6. 全部完成后输出评测统计（从数据库读回）
+```
