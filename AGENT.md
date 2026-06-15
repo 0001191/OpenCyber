@@ -30,23 +30,57 @@
 
 ---
 
-## 项目概览
+## 📋 课程设计项目说明
 
-OpenCyber 是一个 AI 编码智能体 CLI + 桌面应用，基于 [OpenCode](https://github.com/anomalyco/opencode) 二次开发。
+本项目是《网络空间安全综合实践》课程设计的核心系统，定位为**面向 Linux CTF 逆向题的智能体系统**。
 
-**核心能力：** 在终端中与 AI 对话，自动完成编码、调试、重构等开发任务。
+### CTF Agent 子系统
 
-## 技术栈
+Python 实现的 CTF 逆向分析子系统，位于 `ctf_agent/` 目录：
 
-| 层 | 技术 |
-|---|------|
-| 运行时 | Bun >= 1.3.14 |
-| 语言 | TypeScript (strict mode) |
-| 函数式框架 | Effect (效果系统、依赖注入、错误处理) |
-| TUI | 自定义终端 UI (ink + React-like 组件) |
-| 桌面端 | Electron + electron-vite + SolidJS |
-| 数据库 | SQLite + Drizzle ORM |
-| 构建 | Turborepo (monorepo) |
+```
+ctf_agent/
+├── db/              # 数据库层（7 类数据表：samples/tasks/tool_calls/
+│   └── manager.py   #   observations/agent_memory/results/evaluation_stats）
+├── tools/           # 工具层（file/strings/readelf/objdump/GDB/angr/z3 封装）
+│   ├── __init__.py  # 基础工具 + 自动 WSL 适配
+│   └── advanced.py  # Ghidra/angr/Z3 高级工具
+├── agent/
+│   └── core.py      # Agent 主循环（4 阶段闭环：信息收集→环境检查→分析执行→输出）
+├── manager/
+│   └── __init__.py  # 样本导入、任务管理、断点续跑
+├── eval/
+│   └── __init__.py  # 批量评测、报告生成
+└── main.py          # CLI 入口
+```
+
+关键设计：
+- **数据库不只用写**：评测统计、断点续跑、跨任务记忆检索都需要读回数据
+- **WSL 自动适配**：Windows 环境自动通过 WSL 运行 Linux 工具
+- **失败复盘机制**：方向切换 + 失败计数 + 记忆复用
+- **二进制分析 Agent**：定义在 `.opencode/agent/binary-analysis.md`
+
+### 常用命令
+
+```bash
+# 初始化 CTF Agent 数据库
+python ctf_agent/main.py init
+
+# 导入样本
+python ctf_agent/main.py import ./challenge.elf
+
+# 批量评测
+python ctf_agent/main.py eval
+
+# 断点续跑
+python ctf_agent/main.py resume
+```
+
+### 快速开发路线
+
+1. 第 1 周：数据库初始化 → 样本导入 → 基础 ELF 识别 → 跑通最小闭环
+2. 第 2 周：接入 GDB/angr/Ghidra → Agent 记忆系统 → 在开发集上联调
+3. 第 3 周：对接 CTFd → 批量评测 → 项目报告 + 答辩准备
 
 ## 项目结构
 
