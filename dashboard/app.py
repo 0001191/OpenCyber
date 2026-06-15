@@ -12,9 +12,6 @@ import requests as req
 
 urllib3.disable_warnings()
 
-# 绕过系统代理，直连目标服务器
-NO_PROXY = {"http": None, "https": None}
-
 # ── 常量 ───────────────────────────────────────────────
 DB_PATH = "E:/知识产物(必保存)/课设/数据库/opencyber.db"
 DEFAULT_DOWNLOAD_DIR = "E:/知识产物(必保存)/课设/基准测试/NYU_CTF_Bench/development/"
@@ -36,6 +33,7 @@ def ctfd_login(url, user, password):
 
     s = req.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
+    # 通过系统代理（VPN）访问目标
 
     # 先试 API 直接登录（JSON POST 原生支持 UTF-8）
     api_result = _login_via_api(s, url, user, password)
@@ -45,7 +43,7 @@ def ctfd_login(url, user, password):
 
     # 再试 Web 表单登录
     try:
-        r = s.get(f"{url}/login", timeout=10, verify=False, proxies=NO_PROXY)
+        r = s.get(f"{url}/login", timeout=10, verify=False)
         if r.status_code >= 500:
             return None
         m = re.search(r'name="nonce"[^>]*value="([^"]+)"', r.text)
@@ -54,13 +52,13 @@ def ctfd_login(url, user, password):
             s.post(f"{url}/login",
                    data={"name": user, "password": password, "nonce": nonce},
                    timeout=10, verify=False)
-        r = s.get(f"{url}/settings", timeout=10, verify=False, proxies=NO_PROXY)
+        r = s.get(f"{url}/settings", timeout=10, verify=False)
         m = re.search(r'csrfNonce[^"]*"([a-f0-9]+)"', r.text)
         if m:
             csrf = m.group(1)
             r2 = s.post(f"{url}/api/v1/tokens",
                 headers={"CSRF-Token": csrf, "Content-Type": "application/json"},
-                json={"expiration": "2099-12-31"}, timeout=10, verify=False, proxies=NO_PROXY)
+                json={"expiration": "2099-12-31"}, timeout=10, verify=False)
             if r2.status_code == 200:
                 token = r2.json()["data"]["value"]
                 return s, token, {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -76,7 +74,7 @@ def _login_via_api(s, url, user, password):
     try:
         r = s.post(f"{url}/api/v1/users/login",
             json={"name": user, "password": password},
-            timeout=15, verify=False, proxies=NO_PROXY)
+            timeout=15, verify=False)
         if r.status_code == 200:
             data = r.json()
             token = data.get("data", {}).get("access_token", "")
@@ -94,7 +92,7 @@ def _login_via_api(s, url, user, password):
 
 def list_challenges(url, headers, filter_name=None):
     """列出题目，filter_name 支持模糊匹配"""
-    r = req.get(f"{url}/api/v1/challenges", headers=headers, timeout=10, proxies=NO_PROXY)
+    r = req.get(f"{url}/api/v1/challenges", headers=headers, timeout=10)
     data = r.json().get("data", [])
     if filter_name:
         data = [c for c in data if filter_name.lower() in c["name"].lower()]
@@ -103,7 +101,7 @@ def list_challenges(url, headers, filter_name=None):
 
 def fetch_challenge_detail(url, headers, cid):
     """获取题目详情（附件列表）"""
-    r = req.get(f"{url}/api/v1/challenges/{cid}", headers=headers, timeout=10, proxies=NO_PROXY)
+    r = req.get(f"{url}/api/v1/challenges/{cid}", headers=headers, timeout=10)
     return r.json().get("data", {})
 
 
@@ -133,7 +131,7 @@ def download_files(url, challenge, dest_dir):
             fname = f"{name}.bin"
         fpath = os.path.join(ch_dir, fname)
         try:
-            r = req.get(f_url, timeout=60, proxies=NO_PROXY)
+            r = req.get(f_url, timeout=60)
             with open(fpath, "wb") as f:
                 f.write(r.content)
             downloaded.append(fpath)
@@ -163,7 +161,7 @@ def analyze_binary(binary_path):
 
     # ── 阶段1: 静态分析 ──
     try:
-        r = subprocess.run(["file", str(bp)], capture_output=True, text=True, timeout=10, proxies=NO_PROXY)
+        r = subprocess.run(["file", str(bp)], capture_output=True, text=True, timeout=10)
         file_info = r.stdout.strip()
         add_step("file 识别", True, file_info)
         result["evidence"].append(("file", file_info))
@@ -287,18 +285,17 @@ def run_pipeline(url, user, password, challenge_name, dest_dir, status_area):
     result = {"status": "running", "flag": None, "steps": [], "error": None}
     status_area.markdown(step_log("🚀 启动", "开始全自动流程..."))
 
-    # ── 1. 连接（先试 API，再试根路径） ──
+    # ── 1. 连接 ──
     status_area.markdown(step_log("🔗 连接", f"正在连接 {url}..."))
     try:
-        # 直接测试 API 端点
-        r = req.get(f"{url}/api/v1/challenges", timeout=10, verify=False, proxies=NO_PROXY,
+        r = req.get(url, timeout=10, verify=False,
                      headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code < 500:
-            status_area.markdown(step_log("🔗 连接", f"✅ API 可达 (HTTP {r.status_code})"))
-        else:
-            status_area.markdown(step_log("🔗 连接", f"⚠️ API 返回 {r.status_code}，继续尝试登录..."))
+        status_area.markdown(step_log("🔗 连接", f"✅ 连接成功 (HTTP {r.status_code})"))
     except Exception as e:
-        status_area.markdown(step_log("🔗 连接", f"⚠️ API 不可达: {e}，继续尝试登录..."))
+        status_area.markdown(step_log("🔗 连接", f"❌ 连接失败: {e}"))
+        result["status"] = "failed"
+        result["error"] = str(e)
+        return result
 
     # ── 2. 登录 ──
     status_area.markdown(step_log("🔑 登录", f"以 {user} 登录..."))
