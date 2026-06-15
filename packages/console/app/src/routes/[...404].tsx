@@ -1,8 +1,8 @@
 import "./[...404].css"
 import { Title } from "@solidjs/meta"
 import { HttpStatusCode } from "@solidjs/start"
-import logoLight from "../asset/logo-ornate-light.svg"
-import logoDark from "../asset/logo-ornate-dark.svg"
+import logoLight from "../asset/brand/opencyber-logo-light.svg"
+import logoDark from "../asset/brand/opencyber-logo-dark.svg"
 import { useI18n } from "~/context/i18n"
 import { useLanguage } from "~/context/language"
 

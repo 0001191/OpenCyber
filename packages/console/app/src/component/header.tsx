@@ -1,5 +1,5 @@
-import logoLight from "../asset/logo-ornate-light.svg"
-import logoDark from "../asset/logo-ornate-dark.svg"
+import logoLight from "../asset/brand/opencyber-logo-light.svg"
+import logoDark from "../asset/brand/opencyber-logo-dark.svg"
 import copyLogoLight from "../asset/lander/logo-light.svg"
 import copyLogoDark from "../asset/lander/logo-dark.svg"
 import copyWordmarkLight from "../asset/lander/wordmark-light.svg"
@@ -9,10 +9,10 @@ import copyBrandAssetsDark from "../asset/lander/brand-assets-dark.svg"
 
 // SVG files for copying (separate from button icons)
 // Replace these with your actual SVG files for copying
-import copyLogoSvgLight from "../asset/lander/opencode-logo-light.svg"
-import copyLogoSvgDark from "../asset/lander/opencode-logo-dark.svg"
-import copyWordmarkSvgLight from "../asset/lander/opencode-wordmark-light.svg"
-import copyWordmarkSvgDark from "../asset/lander/opencode-wordmark-dark.svg"
+import copyLogoSvgLight from "../asset/lander/opencyber-logo-light.svg"
+import copyLogoSvgDark from "../asset/lander/opencyber-logo-dark.svg"
+import copyWordmarkSvgLight from "../asset/lander/opencyber-wordmark-light.svg"
+import copyWordmarkSvgDark from "../asset/lander/opencyber-wordmark-dark.svg"
 import { A, createAsync, useNavigate } from "@solidjs/router"
 import { createMemo, Match, Show, Switch } from "solid-js"
 import { createStore } from "solid-js/store"
