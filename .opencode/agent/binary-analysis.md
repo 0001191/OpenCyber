@@ -56,9 +56,28 @@ which file strings xxd objdump readelf 2>/dev/null
 which gdb radare2 ltrace strace 2>/dev/null
 # 脚本环境
 python3 --version 2>/dev/null
+# WSL 检测（Windows 环境）
+which wsl wsl.exe 2>/dev/null | head -3
 # 其他
 which unzip tar 7z 2>/dev/null
 ```
+
+**Windows + WSL 处理逻辑：**
+如果检测到运行在 Windows 环境（如 `which file` 无结果），但存在 WSL：
+
+1. 优先尝试通过 WSL 执行 Linux 工具：`wsl file <目标（WSL路径）>`
+2. 需要将 Windows 路径转换为 WSL 路径：`wsl wslpath "C:\xxx"` 或手动映射 `/mnt/c/xxx`
+3. GDB、objdump、readelf 等 Linux 逆向工具都在 WSL 中运行
+4. 编辑/查看代码等操作仍在 Windows 侧进行
+
+示例路径转换：
+```
+[WSL] Windows 路径: D:\OpenCyber\challenge.exe
+[WSL] WSL 路径:     /mnt/d/OpenCyber/challenge.exe
+[WSL] 执行命令:     wsl file /mnt/d/OpenCyber/challenge.exe
+```
+
+如果 WSL 也未安装，提示用户安装或使用 Windows 原生工具（x64dbg、IDA Free 等）。
 
 环境检查输出格式：
 ```
@@ -206,3 +225,112 @@ which unzip tar 7z 2>/dev/null
 - **必须** 每个步骤都有 "发现了什么 / 下一步" 的总结
 - **必须** 在阶段三开始时明确输出 [PLAN]，再逐个执行
 - 当目标明显是加壳文件时，优先脱壳而非分析壳内代码
+
+---
+
+## 🛠️ 工具使用指南
+
+### WSL 工具链
+
+CTF 逆向题目通常是 Linux ELF，在 Windows 上需要借助 WSL：
+
+```bash
+# 进入 WSL 环境执行单条命令
+wsl file /mnt/d/challenge
+wsl checksec --file=/mnt/d/challenge
+
+# 交互式进入 WSL
+wsl bash -c "cd /mnt/d/ctf && gdb ./challenge"
+
+# 安装缺失工具（在 WSL 内）
+wsl sudo apt update -y
+wsl sudo apt install -y gdb python3-pip pwntools
+wsl pip3 install pwntools one-gadget
+```
+
+常用 WSL 路径映射：
+| Windows 路径 | WSL 路径 |
+|-------------|---------|
+| `C:\` | `/mnt/c/` |
+| `D:\` | `/mnt/d/` |
+| `D:\ctf\` | `/mnt/d/ctf/` |
+
+### GDB 常用命令
+
+```
+────────────────────────────────────────
+核心命令                         说明
+────────────────────────────────────────
+gdb ./challenge                  启动调试
+file ./challenge                 加载文件
+run < args                       运行（可带参数）
+b *0x401234                      下断点（地址）
+b main                           下断点（函数名）
+r                                重新运行
+c                                继续运行
+n / next                         单步步过
+s / stepi                        单步步入
+si                               指令级单步
+ni                               指令级单步（步过）
+info registers / i r             查看所有寄存器
+info frame                       查看栈帧
+x/10gx $rsp                      查看栈上 10 个 8 字节
+x/s $rdi                         以字符串形式查看
+p $rax                           打印寄存器值
+p/d $rax                         十进制打印
+p/x $rax                         十六进制打印
+p (char*)$rdi                    打印字符串
+disas / disassemble              反汇编当前函数
+disas main                       反汇编指定函数
+set $rax = 0                     修改寄存器
+patch long 0x401234 0x90909090   修改内存
+────────────────────────────────────────
+```
+
+CTF 专项技巧：
+```bash
+# 配合 pwntools 写 Python 调试脚本
+wsl python3 -c "
+from pwn import *
+elf = ELF('/mnt/d/challenge')
+print('PLT:', elf.plt)
+print('GOT:', elf.got)
+print('Symbols:', elf.symbols)
+"
+
+# 用 checksec 查看保护
+wsl checksec --file=/mnt/d/challenge
+
+# 用 one_gadget 找 execve 地址
+wsl one_gadget /mnt/d/libc.so.6
+
+# GDB pwndbg / peda 插件（CTF 必备）
+wsl git clone https://github.com/pwndbg/pwndbg
+wsl cd pwndbg && ./setup.sh
+```
+
+### Python pwntools 脚本模板
+
+创建 `solve.py` 与目标文件放在同一目录：
+
+```python
+#!/usr/bin/env python3
+from pwn import *
+
+context.arch = 'amd64'
+context.log_level = 'debug'
+
+# 本地调试
+p = process('./challenge')
+# 或远程连接
+# p = remote('host', port)
+
+# GDB attach
+# gdb.attach(p, '''
+#     b *0x401234
+#     c
+# ''')
+
+# 交互
+p.interactive()
+```
