@@ -30,57 +30,65 @@
 
 ---
 
-## 📋 课程设计项目说明
+## 🎯 课程设计定位
 
-本项目是《网络空间安全综合实践》课程设计的核心系统，定位为**面向 Linux CTF 逆向题的智能体系统**。
+本项目是《网络空间安全综合实践》课程设计系统，改造自 OpenCyber（基于 OpenCode 二次开发），定位为**面向 Linux CTF 逆向题的智能体系统**。
 
-### CTF Agent 子系统
-
-Python 实现的 CTF 逆向分析子系统，位于 `ctf_agent/` 目录：
-
-```
-ctf_agent/
-├── db/              # 数据库层（7 类数据表：samples/tasks/tool_calls/
-│   └── manager.py   #   observations/agent_memory/results/evaluation_stats）
-├── tools/           # 工具层（file/strings/readelf/objdump/GDB/angr/z3 封装）
-│   ├── __init__.py  # 基础工具 + 自动 WSL 适配
-│   └── advanced.py  # Ghidra/angr/Z3 高级工具
-├── agent/
-│   └── core.py      # Agent 主循环（4 阶段闭环：信息收集→环境检查→分析执行→输出）
-├── manager/
-│   └── __init__.py  # 样本导入、任务管理、断点续跑
-├── eval/
-│   └── __init__.py  # 批量评测、报告生成
-└── main.py          # CLI 入口
-```
-
-关键设计：
-- **数据库不只用写**：评测统计、断点续跑、跨任务记忆检索都需要读回数据
-- **WSL 自动适配**：Windows 环境自动通过 WSL 运行 Linux 工具
-- **失败复盘机制**：方向切换 + 失败计数 + 记忆复用
-- **二进制分析 Agent**：定义在 `.opencode/agent/binary-analysis.md`
-
-### 常用命令
+### 一句话使用
 
 ```bash
-# 初始化 CTF Agent 数据库
-python ctf_agent/main.py init
+# 启动 OpenCyber
+opencyber
 
-# 导入样本
-python ctf_agent/main.py import ./challenge.elf
+# 然后输入一句话：
+# "帮我分析这个ELF文件，找出flag"
+# "逆向这个二进制，我要找到正确的输入"
+# "自动分析这个程序，找到加密逻辑和flag"
+```
 
-# 批量评测
-python ctf_agent/main.py eval
+Agent（定义在 `.opencode/agent/binary-analysis.md`）会自动执行 4 阶段闭环：
+1. **信息收集** — `file`、`strings`、`readelf` 识别文件
+2. **环境检查** — 检查 WSL/GDB 等工具是否就绪
+3. **规划执行** — 分析决策 → 工具调用 → 记忆更新 → 失败切换
+4. **验证输出** — 确认 flag 格式并输出
 
-# 断点续跑
-python ctf_agent/main.py resume
+### 配置
+
+OpenCyber 的 CTF 模式配置在 `.opencode/opencode.jsonc` 中。
+首次使用前需要配置 LLM API Key：
+
+```bash
+# 设置 API Key（DeepSeek / 通义千问 / GLM 等）
+opencyber config set provider.api_key "sk-xxx"
+```
+
+### 项目结构
+
+```
+├── .opencode/
+│   ├── agent/
+│   │   ├── binary-analysis.md   # ★ CTF 逆向 Agent 定义
+│   │   ├── duplicate-pr.md
+│   │   └── triage.md
+│   ├── opencode.jsonc           # 配置（已开启 CTF 工具权限）
+│   ├── skills/
+│   │   └── effect/
+│   ├── command/                 # 命令定义
+│   └── tool/                    # 工具脚本
+├── packages/
+│   ├── opencode/                # ★ 核心 CLI（入口）
+│   ├── desktop/                 # Electron 桌面应用
+│   ├── ui/ / app/ / core/       # 共享模块
+│   └── ...
+├── AGENT.md                     # 本文件
+└── README.md
 ```
 
 ### 快速开发路线
 
-1. 第 1 周：数据库初始化 → 样本导入 → 基础 ELF 识别 → 跑通最小闭环
-2. 第 2 周：接入 GDB/angr/Ghidra → Agent 记忆系统 → 在开发集上联调
-3. 第 3 周：对接 CTFd → 批量评测 → 项目报告 + 答辩准备
+1. **第 1 周**：配置 LLM API Key → 跑通 OpenCyber CLI → 验证 binary-analysis agent 能自动分析基础 ELF
+2. **第 2 周**：完善 agent 策略 → 接入 GDB/angr 等工具 → 在开发集上联调
+3. **第 3 周**：批量评测 → 项目文档 → 答辩准备
 
 ## 项目结构
 
