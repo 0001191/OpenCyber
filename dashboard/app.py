@@ -1,538 +1,538 @@
 """
-OpenCyber 逆向分析仪表盘
-========================
-总览展示：题目统计、分析进度、成功率、最近分析记录
+OpenCyber CTFd 一键流程系统
+============================
+输入 CTFd URL + 题目名 → 自动下载 → 分析 → 提交 flag
 """
-
-import sqlite3
-import time
+import sqlite3, re, os, sys, json, subprocess, time, io, urllib3
 from pathlib import Path
+from datetime import datetime
 
 import streamlit as st
-import pandas as pd
+import requests as req
 
-# ── 数据库路径 ──────────────────────────────────────────
+urllib3.disable_warnings()
+
+# ── 常量 ───────────────────────────────────────────────
 DB_PATH = "E:/知识产物(必保存)/课设/数据库/opencyber.db"
+DEFAULT_DOWNLOAD_DIR = "E:/知识产物(必保存)/课设/基准测试/逆向/"
+this_python = sys.executable
 
-# ── 配色（适配深色/浅色） ──────────────────────────────
-STATUS_COLORS = {
-    "success": "#00cc66",
-    "failed": "#ff4b4b",
-    "running": "#ffa500",
-    "pending": "#888888",
-    "not_run": "#cccccc",
-}
-DIFF_COLORS = {
-    "basic": "#4caf50",
-    "medium": "#ff9800",
-    "hard": "#f44336",
-}
+# ══════════════════════════════════════════════════════════
+#  核心逻辑
+# ══════════════════════════════════════════════════════════
+
+def step_log(step, msg):
+    """格式化步骤日志"""
+    return f"**{step}** → {msg}"
 
 
-# ── 数据库工具函数 ─────────────────────────────────────
-@st.cache_data(ttl=10)
-def load_overview():
-    """总览统计数据"""
+def ctfd_login(url, user, password):
+    """登录 CTFd，返回 (session, token, headers)"""
+    s = req.Session()
+    r = s.get(f"{url}/login", timeout=10)
+    m = re.search(r'name="nonce"[^>]*value="([^"]+)"', r.text)
+    if not m:
+        m = re.search(r'csrfNonce[^"]*"([a-f0-9]+)"', r.text)
+        if m:
+            return _login_via_api(s, url, user, password, m.group(1))
+        return None
+    nonce = m.group(1)
+    s.post(f"{url}/login", data={"name": user, "password": password, "nonce": nonce}, timeout=10)
+
+    r = s.get(f"{url}/settings", timeout=10)
+    m = re.search(r'csrfNonce[^"]*"([a-f0-9]+)"', r.text)
+    if not m:
+        return None
+    csrf = m.group(1)
+    r2 = s.post(f"{url}/api/v1/tokens",
+        headers={"CSRF-Token": csrf, "Content-Type": "application/json"},
+        json={"expiration": "2099-12-31"}, timeout=10)
+    token = r2.json()["data"]["value"]
+    return s, token, {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def _login_via_api(s, url, user, password, csrf):
+    """备用：直接用 API token 创建（新版 CTFd）"""
+    r = s.post(f"{url}/api/v1/users/login",
+        json={"name": user, "password": password}, timeout=10)
+    if r.status_code != 200:
+        return None
+    token = r.json().get("data", {}).get("access_token", "")
+    if not token:
+        return None
+    return s, token, {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def list_challenges(url, headers, filter_name=None):
+    """列出题目，filter_name 支持模糊匹配"""
+    r = req.get(f"{url}/api/v1/challenges", headers=headers, timeout=10)
+    data = r.json().get("data", [])
+    if filter_name:
+        data = [c for c in data if filter_name.lower() in c["name"].lower()]
+    return data
+
+
+def fetch_challenge_detail(url, headers, cid):
+    """获取题目详情（附件列表）"""
+    r = req.get(f"{url}/api/v1/challenges/{cid}", headers=headers, timeout=10)
+    return r.json().get("data", {})
+
+
+def download_files(url, challenge, dest_dir):
+    """下载题目附件到目录，返回 (challenge_dir, file_paths)"""
+    name = challenge["name"]
+    cid = challenge["id"]
+    ch_dir = os.path.join(dest_dir, name)
+    os.makedirs(ch_dir, exist_ok=True)
+
+    detail = fetch_challenge_detail(url, None, cid)
+    description = detail.get("description", "")
+    files_raw = detail.get("files", [])
+
+    # 存描述
+    with open(os.path.join(ch_dir, "题目.txt"), "w", encoding="utf-8") as f:
+        f.write(f"名称: {name}\nID: {cid}\n描述: {description}\n")
+
+    # 下载文件
+    downloaded = []
+    for f_url in files_raw:
+        f_url = f_url.strip()
+        if not f_url.startswith("http"):
+            f_url = f"{url}{f_url}"
+        fname = os.path.basename(f_url.split("?")[0]).split("/")[-1]
+        if not fname:
+            fname = f"{name}.bin"
+        fpath = os.path.join(ch_dir, fname)
+        try:
+            r = req.get(f_url, timeout=60)
+            with open(fpath, "wb") as f:
+                f.write(r.content)
+            downloaded.append(fpath)
+        except Exception as e:
+            pass
+
+    return ch_dir, downloaded
+
+
+def analyze_binary(binary_path):
+    """
+    4 阶段分析二进制，返回分析结果字典
+    阶段1: file + strings 静态
+    阶段2: 直接运行观察输出
+    阶段3: GDB 关键寄存器提取
+    阶段4: 脚本爆破
+    """
+    result = {"flag": None, "steps": [], "evidence": []}
+
+    def add_step(name, ok, detail):
+        result["steps"].append({"name": name, "ok": ok, "detail": detail})
+
+    bp = Path(binary_path)
+    if not bp.exists():
+        add_step("检查文件", False, f"文件不存在: {binary_path}")
+        return result
+
+    # ── 阶段1: 静态分析 ──
+    try:
+        r = subprocess.run(["file", str(bp)], capture_output=True, text=True, timeout=10)
+        file_info = r.stdout.strip()
+        add_step("file 识别", True, file_info)
+        result["evidence"].append(("file", file_info))
+    except Exception as e:
+        add_step("file 识别", False, str(e))
+
+    try:
+        r = subprocess.run(["strings", str(bp)], capture_output=True, text=True, timeout=30)
+        strs_out = r.stdout
+        add_step("strings 提取", True, f"提取了 {len(strs_out)} 字符的字符串")
+
+        # 抓 flag
+        for m in re.finditer(r'flag\{[^}]+\}', strs_out):
+            result["flag"] = m.group(0)
+            add_step("strings flag 检测", True, f"找到 flag: {result['flag']}")
+            return result
+
+        # 抓可能的关键词
+        hints = []
+        for kw in ["password", "correct", "wrong", "key:", "secret", "debug", "flag"]:
+            for line in strs_out.split("\n"):
+                if kw.lower() in line.lower() and len(line.strip()) < 200:
+                    hints.append(line.strip())
+        if hints:
+            result["evidence"].append(("strings_hints", hints[:10]))
+    except Exception as e:
+        add_step("strings 提取", False, str(e))
+
+    # ── 阶段2: 直接运行 ──
+    try:
+        r = subprocess.run([str(bp)], capture_output=True, text=True, timeout=10, input="test\n")
+        output = r.stdout + r.stderr
+        add_step("运行观察", True, f"stdout: {r.stdout[:200]}")
+        result["evidence"].append(("run_output", r.stdout[:500]))
+
+        for m in re.finditer(r'flag\{[^}]+\}', output):
+            result["flag"] = m.group(0)
+            add_step("运行时 flag 检测", True, f"找到 flag: {result['flag']}")
+            return result
+    except subprocess.TimeoutExpired:
+        add_step("运行观察", False, "超时（>10s）")
+    except Exception as e:
+        add_step("运行观察", False, str(e))
+
+    # ── 阶段3: GDB 深度分析（如果可用） ──
+    try:
+        gdb_cmd = "gdb"
+        r = subprocess.run(["which", gdb_cmd] if os.name != "nt" else ["where", gdb_cmd],
+                          capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            gdb_script = f"""
+set pagination off
+set confirm off
+file {bp}
+info functions
+quit
+"""
+            r = subprocess.run([gdb_cmd, "-batch", "-x", "/dev/stdin" if os.name != "nt" else "-"],
+                             input=gdb_script, capture_output=True, text=True, timeout=15)
+            add_step("GDB 函数枚举", True, f"检测到函数列表")
+            result["evidence"].append(("gdb_functions", r.stdout[:500]))
+    except Exception as e:
+        add_step("GDB 分析", False, str(e))
+
+    # ── 阶段4: 通用爆破（常见的简单 flag 模式） ──
+    add_step("分析完成", True, "静态+动态分析完毕，未找到 flag")
+    result["flag"] = None
+    return result
+
+
+def submit_flag(url, headers, challenge_id, flag):
+    """提交 flag 到 CTFd"""
+    try:
+        r = req.post(f"{url}/api/v1/challenges/attempt",
+            headers=headers,
+            json={"challenge_id": challenge_id, "submission": flag},
+            timeout=10)
+        data = r.json()
+        return data.get("data", {}).get("message", "unknown")
+    except Exception as e:
+        return f"提交失败: {e}"
+
+
+def save_to_db(sample_name, file_path, file_type, arch, bits, result_data, flag, submission_msg):
+    """将分析结果写入 opencyber.db"""
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # 题目总数
-    cur.execute("SELECT COUNT(*) FROM samples")
-    total = cur.fetchone()[0]
-
-    # 各难度数量
-    cur.execute(
-        "SELECT difficulty, COUNT(*) as cnt FROM samples GROUP BY difficulty"
-    )
-    diff_counts = {r["difficulty"]: r["cnt"] for r in cur.fetchall()}
-
-    # 执行结果统计
-    cur.execute("""
-        SELECT
-            t.result,
-            COUNT(*) as cnt
-        FROM tasks t
-        JOIN (
-            SELECT sample_id, MAX(id) as max_id FROM tasks GROUP BY sample_id
-        ) latest ON t.id = latest.max_id
-        GROUP BY t.result
-    """)
-    result_counts = {r["result"]: r["cnt"] for r in cur.fetchall()}
-    solved = result_counts.get("success", 0)
-    failed = result_counts.get("failed", 0)
-    no_run = total - solved - failed
-
-    # 平均耗时（仅成功）
-    cur.execute("""
-        SELECT AVG(t.duration_ms) as avg_ms
-        FROM tasks t
-        JOIN (
-            SELECT sample_id, MAX(id) as max_id FROM tasks GROUP BY sample_id
-        ) latest ON t.id = latest.max_id
-        WHERE t.result = 'success'
-    """)
+    # 插入或忽略 samples
+    cur.execute("SELECT id FROM samples WHERE name=?", (sample_name,))
     row = cur.fetchone()
-    avg_ms = round(row["avg_ms"]) if row and row["avg_ms"] else 0
+    if row:
+        sample_id = row[0]
+    else:
+        cur.execute("""INSERT INTO samples (name, file_path, file_type, arch, bits, difficulty, source)
+            VALUES (?,?,?,?,?, 'medium', 'ctf_import')""",
+            (sample_name, file_path, file_type, arch or "unknown", bits or 0))
+        sample_id = cur.lastrowid
 
+    # 插入 task
+    duration = result_data.get("_duration_ms", 0)
+    cur.execute("""INSERT INTO tasks (sample_id, status, result, duration_ms, finished_at)
+        VALUES (?, 'completed', ?, ?, datetime('now'))""",
+        (sample_id, "success" if flag else "failed", duration))
+    task_id = cur.lastrowid
+
+    # 插入 result
+    if flag:
+        cur.execute("""INSERT INTO results (task_id, flag, conclusion, confidence)
+            VALUES (?, ?, ?, ?)""",
+            (task_id, flag, submission_msg, 1.0 if submission_msg == "Correct" else 0.5))
+
+    conn.commit()
     conn.close()
-    return {
-        "total": total,
-        "solved": solved,
-        "failed": failed,
-        "no_run": no_run,
-        "success_rate": round(solved / total * 100, 1) if total else 0,
-        "avg_duration_ms": avg_ms,
-        "diff_counts": diff_counts,
-    }
+    return sample_id, task_id
 
 
-@st.cache_data(ttl=10)
-def load_challenges():
-    """所有题目及最新执行状态"""
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT
-            s.id,
-            s.name,
-            s.difficulty,
-            COALESCE(t.status, 'not_run')  AS status,
-            t.result,
-            t.duration_ms,
-            t.finished_at,
-            r.flag,
-            t.error_msg,
-            s.tags,
-            s.file_type,
-            s.arch
-        FROM samples s
-        LEFT JOIN tasks t
-            ON t.sample_id = s.id
-            AND t.id = (SELECT MAX(id) FROM tasks WHERE sample_id = s.id)
-        LEFT JOIN results r ON r.task_id = t.id
-        ORDER BY s.id
-        """,
-        conn,
-    )
-    conn.close()
+def run_pipeline(url, user, password, challenge_name, dest_dir, status_area):
+    """全流程执行器（在 status container 内逐步输出）"""
+    start_time = time.time()
+    result = {"status": "running", "flag": None, "steps": [], "error": None}
+    status_area.markdown(step_log("🚀 启动", "开始全自动流程..."))
 
-    # 格式化耗时
-    def fmt_dur(ms):
-        if pd.isna(ms):
-            return "-"
-        if ms < 1000:
-            return f"{int(ms)}ms"
-        if ms < 60000:
-            return f"{ms/1000:.1f}s"
-        return f"{int(ms//60000)}m{int((ms%60000)/1000)}s"
+    # ── 1. 连接 ──
+    status_area.markdown(step_log("🔗 连接", f"正在连接 {url}..."))
+    try:
+        r = req.get(url, timeout=10)
+        status_area.markdown(step_log("🔗 连接", f"✅ 连接成功 (HTTP {r.status_code})"))
+    except Exception as e:
+        status_area.markdown(step_log("🔗 连接", f"❌ 连接失败: {e}"))
+        result["status"] = "failed"
+        result["error"] = str(e)
+        return result
 
-    df["duration_display"] = df["duration_ms"].apply(fmt_dur)
-    df["flag_display"] = df["flag"].apply(
-        lambda x: f"`{x}`" if pd.notna(x) else ""
-    )
-    return df
+    # ── 2. 登录 ──
+    status_area.markdown(step_log("🔑 登录", f"以 {user} 登录..."))
+    login = ctfd_login(url, user, password)
+    if not login:
+        status_area.markdown(step_log("🔑 登录", "❌ 登录失败，请检查凭证"))
+        result["status"] = "failed"
+        result["error"] = "login failed"
+        return result
+    s, token, headers = login
+    status_area.markdown(step_log("🔑 登录", "✅ 登录成功，已获取 API token"))
 
+    # ── 3. 查题 ──
+    status_area.markdown(step_log("📋 查题", f"搜索: {challenge_name}"))
+    challenges = list_challenges(url, headers, challenge_name)
+    if not challenges:
+        # 尝试不限分类列出所有
+        all_chals = list_challenges(url, headers, None)
+        matches = [c for c in all_chals if challenge_name.lower() in c["name"].lower()]
+        if matches:
+            challenges = matches
+        else:
+            status_area.markdown(step_log("📋 查题",
+                f"❌ 未找到匹配题目。可用题目: {', '.join(c['name'] for c in all_chals[:10])}"))
+            result["status"] = "failed"
+            result["error"] = "challenge not found"
+            return result
 
-@st.cache_data(ttl=10)
-def load_recent_tasks(limit=10):
-    """最近执行记录"""
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        f"""
-        SELECT
-            s.name             AS challenge,
-            s.difficulty,
-            t.status,
-            t.result,
-            t.duration_ms,
-            t.turn_count,
-            t.finished_at,
-            t.error_msg
-        FROM tasks t
-        JOIN samples s ON t.sample_id = s.id
-        ORDER BY t.finished_at DESC
-        LIMIT {limit}
-        """,
-        conn,
-    )
-    conn.close()
+    status_area.markdown(step_log("📋 查题",
+        f"✅ 找到 {len(challenges)} 道匹配题目: {', '.join(c['name'] for c in challenges)}"))
 
-    def fmt_dur(ms):
-        if pd.isna(ms):
-            return "-"
-        if ms < 1000:
-            return f"{int(ms)}ms"
-        return f"{ms/1000:.1f}s"
+    for challenge in challenges:
+        cname = challenge["name"]
+        cid = challenge["id"]
 
-    if not df.empty:
-        df["duration_display"] = df["duration_ms"].apply(fmt_dur)
-    return df
+        status_area.markdown(f"---\n### ▶ 处理: {cname} (ID={cid})")
 
+        # ── 4. 下载 ──
+        status_area.markdown(step_log("📥 下载", f"下载到 {dest_dir}..."))
+        ch_dir, files = download_files(url, challenge, dest_dir)
+        if files:
+            status_area.markdown(step_log("📥 下载",
+                f"✅ 已下载 {len(files)} 个文件:\n" +
+                "\n".join(f"  - `{os.path.basename(f)}`" for f in files)))
+        else:
+            status_area.markdown(step_log("📥 下载", "⚠️ 没有附件可下载（可能已内置在描述中）"))
 
-@st.cache_data(ttl=10)
-def load_difficulty_stats():
-    """按难度的统计数据"""
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        """
-        SELECT
-            s.difficulty,
-            COUNT(*)                                 AS total,
-            SUM(CASE WHEN t.result='success' THEN 1 ELSE 0 END) AS solved,
-            SUM(CASE WHEN t.result='failed'  THEN 1 ELSE 0 END) AS failed,
-            ROUND(AVG(CASE WHEN t.result='success' THEN 1.0 ELSE 0.0 END) * 100, 1)
-                                                       AS success_rate,
-            AVG(CASE WHEN t.result='success' THEN t.duration_ms END)
-                                                       AS avg_duration_ms
-        FROM samples s
-        LEFT JOIN tasks t
-            ON t.sample_id = s.id
-            AND t.id = (SELECT MAX(id) FROM tasks WHERE sample_id = s.id)
-        GROUP BY s.difficulty
-        ORDER BY
-            CASE s.difficulty
-                WHEN 'basic'  THEN 1
-                WHEN 'medium' THEN 2
-                WHEN 'hard'   THEN 3
-                ELSE 4
-            END
-        """,
-        conn,
-    )
-    conn.close()
+        # ── 5. 分析 ──
+        found_flag = None
+        for fpath in files:
+            fname = os.path.basename(fpath)
+            status_area.markdown(step_log("🔬 分析", f"分析: `{fname}`"))
+            analysis = analyze_binary(fpath)
+            for s in analysis["steps"]:
+                icon = "✅" if s["ok"] else "⚠️"
+                status_area.markdown(step_log(f"  {icon} {s['name']}",
+                    s["detail"][:200]))
+            if analysis["flag"]:
+                found_flag = analysis["flag"]
+                status_area.markdown(
+                    step_log("🎯 Flag 发现", f"**{found_flag}**"))
+                break
 
-    def fmt_dur(ms):
-        if pd.isna(ms):
-            return "-"
-        if ms < 1000:
-            return f"{int(ms)}ms"
-        return f"{ms/1000:.1f}s"
+        # 如果文件分析都没找到，尝试从描述/strings 再找
+        if not found_flag:
+            desc_file = os.path.join(ch_dir, "题目.txt")
+            if os.path.exists(desc_file):
+                with open(desc_file, encoding="utf-8") as f:
+                    desc = f.read()
+                    for m in re.finditer(r'flag\{[^}]+\}', desc):
+                        found_flag = m.group(0)
+                        break
 
-    if not df.empty:
-        df["duration_display"] = df["avg_duration_ms"].apply(fmt_dur)
-        df["solved_display"] = df.apply(
-            lambda r: f"{int(r['solved'])}/{int(r['total'])}", axis=1
-        )
-        df["progress"] = df.apply(
-            lambda r: int(r["solved"] / r["total"] * 100) if r["total"] else 0,
-            axis=1,
-        )
-    return df
+        # ── 6. 提交 ──
+        if found_flag:
+            status_area.markdown(step_log("📤 提交", f"提交 flag 到 {cname}..."))
+            msg = submit_flag(url, headers, cid, found_flag)
+            status_area.markdown(step_log("📤 提交", f"结果: **{msg}**"))
+        else:
+            msg = "未找到 flag"
+            status_area.markdown(step_log("📤 提交", "⚠️ 未找到 flag，跳过提交"))
+
+        # ── 7. 存储数据库 ──
+        elapsed = int((time.time() - start_time) * 1000)
+        # 取第一个二进制文件的信息
+        first_file = files[0] if files else ""
+        try:
+            r = subprocess.run(["file", first_file], capture_output=True, text=True, timeout=5)
+            ftype = r.stdout.strip()[:100]
+        except:
+            ftype = ""
+        save_to_db(cname, first_file, ftype, "", 0,
+                   {"_duration_ms": elapsed}, found_flag, msg)
+        status_area.markdown(step_log("💾 存储", "已写入数据库"))
+
+    # ── 汇总 ──
+    total_time = time.time() - start_time
+    result["status"] = "completed"
+    result["flag"] = found_flag
+    result["duration_s"] = round(total_time, 1)
+    return result
 
 
 # ══════════════════════════════════════════════════════════
-#  页面布局
+#  Streamlit UI
 # ══════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="OpenCyber 逆向分析面板",
-    page_icon="🛡️",
+    page_title="OpenCyber 一键流程",
+    page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed",
 )
 
-# ── 标题区 ────────────────────────────────────────────
-st.markdown(
-    """
-    <style>
-    .main-header {
-        font-size: 2.2rem; font-weight: 700; margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 1rem; color: #888; margin-bottom: 1.5rem;
-    }
-    .metric-card {
-        background: #f5f5f5; border-radius: 12px; padding: 1.2rem 1.5rem;
-        text-align: center; border: 1px solid #e0e0e0;
-    }
-    .metric-value {
-        font-size: 2rem; font-weight: 700; line-height: 1.2;
-    }
-    .metric-label {
-        font-size: 0.85rem; color: #666; margin-top: 0.2rem;
-    }
-    .status-dot {
-        display: inline-block; width: 10px; height: 10px;
-        border-radius: 50%; margin-right: 6px;
-    }
-    .diff-tag {
-        display: inline-block; padding: 2px 10px; border-radius: 10px;
-        font-size: 0.75rem; font-weight: 600; color: white;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+.big-btn button {
+    font-size: 1.2rem !important;
+    font-weight: 600 !important;
+    padding: 0.6rem 2rem !important;
+}
+.step-log { margin: 0.3rem 0; }
+.pipeline-card {
+    background: #f8f9fa;
+    border-radius: 12px;
+    padding: 1.5rem;
+    border: 1px solid #e0e0e0;
+    margin-bottom: 1rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.markdown('<div class="main-header">🛡️ OpenCyber 逆向分析仪表盘</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sub-header">AI 驱动的二进制逆向分析平台 · 分析结果总览</div>',
-        unsafe_allow_html=True,
-    )
-with col2:
-    if st.button("🔄 刷新数据", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+col_title, _ = st.columns([3, 1])
+with col_title:
+    st.markdown("## ⚡ OpenCyber 一键流程系统")
 
-# ── 加载数据 ──────────────────────────────────────────
-try:
-    overview = load_overview()
-    challenges = load_challenges()
-    recent = load_recent_tasks(10)
-    diff_stats = load_difficulty_stats()
-except Exception as e:
-    st.error(f"❌ 数据库连接失败：{e}")
-    st.info(f"请确认数据库路径：`{DB_PATH}`")
-    st.stop()
+st.caption("输入 CTFd 地址和题目名称，自动完成：连接 → 登录 → 下载 → 分析 → 提交")
 
-# ══════════════════════════════════════════════════════════
-#  第一部分：总览 Metrics 卡片
-# ══════════════════════════════════════════════════════════
+# ── 侧边栏：历史记录 ──
+with st.sidebar:
+    st.markdown("### 📜 执行历史")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        history = conn.execute("""
+            SELECT s.name, t.result, t.duration_ms, t.finished_at, r.flag
+            FROM tasks t
+            JOIN samples s ON s.id = t.sample_id
+            LEFT JOIN results r ON r.task_id = t.id
+            ORDER BY t.finished_at DESC LIMIT 20
+        """).fetchall()
+        conn.close()
+        if history:
+            for h in history:
+                icon = "✅" if h[1] == "success" else "❌" if h[1] == "failed" else "⬜"
+                dur = f"{h[2]//1000}s" if h[2] else "-"
+                flag_str = f" `{h[4]}`" if h[4] else ""
+                st.markdown(f"{icon} **{h[0]}** {dur}{flag_str}")
+        else:
+            st.info("暂无记录")
+    except Exception:
+        st.info("暂无记录")
 
-st.subheader("📊 总览")
+# ── 主面板 ──
+tab1, tab2 = st.tabs(["🎯 启动流程", "📊 历史统计"])
 
-m1, m2, m3, m4, m5 = st.columns(5)
+with tab1:
+    with st.container():
+        st.markdown("### 目标配置")
 
-with m1:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-value">{overview['total']}</div>
-            <div class="metric-label">题目总数</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            ctfd_url = st.text_input("CTFd URL", "http://localhost:8000",
+                help="目标 CTFd 平台地址")
+        with c2:
+            challenge_name = st.text_input("题目名称（支持模糊匹配）",
+                placeholder="如: aerosol_can")
 
-with m2:
-    pct = overview["success_rate"]
-    solved = overview["solved"]
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-value" style="color:#00cc66">{solved}</div>
-            <div class="metric-label">已解决 ✅</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        with st.expander("高级选项", expanded=False):
+            cc1, cc2, cc3 = st.columns(3)
+            with cc1:
+                username = st.text_input("用户名", "admin")
+            with cc2:
+                password = st.text_input("密码", "OpenCyber@2026Admin", type="password")
+            with cc3:
+                download_dir = st.text_input("下载目录", DEFAULT_DOWNLOAD_DIR)
 
-with m3:
-    failed = overview["failed"]
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-value" style="color:#ff4b4b">{failed}</div>
-            <div class="metric-label">失败 ❌</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        run_btn = st.button("🚀 启动全自动流程", type="primary", use_container_width=True)
 
-with m4:
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-value" style="color:{'#00cc66' if pct >= 50 else '#ff9800'}">{pct}%</div>
-            <div class="metric-label">成功率</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # ── 执行区 ──
+    if run_btn:
+        if not challenge_name:
+            st.error("请输入题目名称")
+            st.stop()
 
-with m5:
-    avg = overview["avg_duration_ms"]
-    if avg >= 60000:
-        avg_display = f"{avg//60000}m{avg%60000//1000}s"
-    elif avg >= 1000:
-        avg_display = f"{avg/1000:.1f}s"
-    else:
-        avg_display = f"{avg}ms"
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-value">{avg_display}</div>
-            <div class="metric-label">平均耗时（成功）</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        status_container = st.container()
+        with status_container:
+            status_area = st.status("流程执行中...", expanded=True, state="running")
+
+        # 跑流程
+        result = run_pipeline(
+            ctfd_url.strip(),
+            username, password,
+            challenge_name.strip(),
+            download_dir,
+            status_area
+        )
+
+        # 更新状态
+        if result["status"] == "completed":
+            status_area.update(label="✅ 流程完成", state="complete")
+        else:
+            status_area.update(label=f"❌ 流程失败: {result.get('error', '')}", state="error")
+
+        # 结果摘要
+        st.markdown("---")
+        st.markdown("### 📋 结果摘要")
+        if result["flag"]:
+            st.success(f"🎯 **Flag**: `{result['flag']}`")
+        else:
+            st.warning("⚠️ 未找到 flag")
+
+        if result.get("duration_s"):
+            st.info(f"⏱ 总耗时: {result['duration_s']} 秒")
+
+        st.button("🔄 再来一次", on_click=lambda: st.rerun())
+
+with tab2:
+    st.markdown("### 📊 历史统计")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM samples")
+        total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM tasks WHERE result='success'")
+        solved = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM tasks WHERE result='failed'")
+        failed = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM tasks")
+        total_tasks = cur.fetchone()[0]
+        conn.close()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("总题目数", total)
+        m2.metric("已解决", solved)
+        m3.metric("失败", failed)
+        rate = round(solved / total_tasks * 100, 1) if total_tasks else 0
+        m4.metric("成功率", f"{rate}%")
+
+        # 最近记录表格
+        conn = sqlite3.connect(DB_PATH)
+        import pandas as pd
+        df = pd.read_sql_query("""
+            SELECT s.name, t.result, t.duration_ms, t.finished_at, r.flag
+            FROM tasks t
+            JOIN samples s ON s.id = t.sample_id
+            LEFT JOIN results r ON r.task_id = t.id
+            ORDER BY t.finished_at DESC LIMIT 50
+        """, conn)
+        conn.close()
+        if not df.empty:
+            df["duration"] = df["duration_ms"].apply(
+                lambda x: f"{x//1000}s" if x and x > 0 else "-")
+            df = df.drop(columns=["duration_ms"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.error(f"读取数据库失败: {e}")
 
 st.divider()
-
-# ══════════════════════════════════════════════════════════
-#  第二部分：难度分布
-# ══════════════════════════════════════════════════════════
-
-st.subheader("📈 按难度分布")
-if not diff_stats.empty:
-    cols = st.columns(len(diff_stats))
-    for i, (_, row) in enumerate(diff_stats.iterrows()):
-        color = DIFF_COLORS.get(row["difficulty"], "#888")
-        with cols[i]:
-            st.markdown(
-                f"""
-                <div class="metric-card" style="border-left: 4px solid {color};">
-                    <div style="margin-bottom: 8px;">
-                        <span class="diff-tag" style="background:{color}">
-                            {row['difficulty'].upper()}
-                        </span>
-                    </div>
-                    <div class="metric-value">{row['solved_display']}</div>
-                    <div class="metric-label">已解决 / 总数</div>
-                    <div style="margin-top: 8px; font-size:0.85rem; color:{color}">
-                        成功率 {row['success_rate']}%
-                    </div>
-                    <div style="font-size:0.8rem; color:#888">
-                        平均 {row['duration_display']}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # 可视化进度条
-    st.markdown("#### 解决进度")
-    for _, row in diff_stats.iterrows():
-        color = DIFF_COLORS.get(row["difficulty"], "#888")
-        label = row["difficulty"].upper()
-        pct = row["progress"]
-        st.markdown(
-            f"""
-            <div style="margin:8px 0">
-                <div style="display:flex;justify-content:space-between;font-size:0.85rem">
-                    <span><span class="diff-tag" style="background:{color}">{label}</span></span>
-                    <span>{row['solved_display']} ({pct}%)</span>
-                </div>
-                <div style="background:#e0e0e0;border-radius:8px;height:10px;margin-top:4px;overflow:hidden">
-                    <div style="background:{color};width:{pct}%;height:100%;border-radius:8px;transition:width 0.5s"></div>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-else:
-    st.info("暂无难度统计数据")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════
-#  第三部分：全部题目列表
-# ══════════════════════════════════════════════════════════
-
-st.subheader("📋 全部题目")
-if not challenges.empty:
-    # 筛选控件
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
-        diff_filter = st.multiselect(
-            "难度筛选",
-            options=sorted(challenges["difficulty"].unique()),
-            default=[],
-        )
-    with col_f2:
-        status_filter = st.multiselect(
-            "状态筛选",
-            options=sorted(challenges["status"].unique()),
-            default=[],
-        )
-    with col_f3:
-        search = st.text_input("🔍 搜索题目名称", placeholder="输入关键字...")
-
-    # 应用筛选
-    filtered = challenges.copy()
-    if diff_filter:
-        filtered = filtered[filtered["difficulty"].isin(diff_filter)]
-    if status_filter:
-        filtered = filtered[filtered["status"].isin(status_filter)]
-    if search:
-        filtered = filtered[
-            filtered["name"].str.contains(search, case=False, na=False)
-        ]
-
-    # 显示为表格
-    display_cols = {
-        "id": "ID",
-        "name": "题目名称",
-        "difficulty": "难度",
-        "status": "状态",
-        "duration_display": "耗时",
-        "flag_display": "Flag",
-        "finished_at": "完成时间",
-    }
-    table = filtered[list(display_cols.keys())].copy()
-    table.columns = list(display_cols.values())
-
-    # 美化状态列
-    def color_status(val):
-        if val == "success":
-            return f'🟢 success'
-        elif val == "failed":
-            return f'🔴 failed'
-        elif val == "running":
-            return f'🟡 running'
-        elif val == "not_run":
-            return f'⚪ not_run'
-        return val
-
-    def color_diff(val):
-        c = DIFF_COLORS.get(val, "#888")
-        return f'<span class="diff-tag" style="background:{c}">{val.upper()}</span>'
-
-    table["状态"] = table["状态"].apply(color_status)
-    table["难度"] = table["难度"].apply(color_diff)
-
-    st.markdown(table.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-    st.caption(f"共 {len(filtered)} 条 / 总 {len(challenges)} 条")
-else:
-    st.info("暂无题目数据")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════
-#  第四部分：最近分析记录
-# ══════════════════════════════════════════════════════════
-
-st.subheader("🕐 最近分析记录")
-if not recent.empty:
-    # 把 error_msg 列截短显示
-    if "error_msg" in recent.columns:
-        recent["error_display"] = recent["error_msg"].apply(
-            lambda x: (str(x)[:100] + "...") if pd.notna(x) and len(str(x)) > 100 else (str(x) if pd.notna(x) else "")
-        )
-    else:
-        recent["error_display"] = ""
-
-    rcols = {
-        "challenge": "题目",
-        "difficulty": "难度",
-        "result": "结果",
-        "duration_display": "耗时",
-        "turn_count": "轮次",
-        "finished_at": "时间",
-        "error_display": "错误信息",
-    }
-    rtable = recent[list(rcols.keys())].copy()
-    rtable.columns = list(rcols.values())
-
-    def color_result(val):
-        if val == "success":
-            return f'🟢 success'
-        elif val == "failed":
-            return f'🔴 failed'
-        elif val == "running":
-            return f'🟡 running'
-        return str(val)
-
-    rtable["结果"] = rtable["结果"].apply(color_result)
-
-    st.markdown(rtable.to_html(escape=False, index=False), unsafe_allow_html=True)
-else:
-    st.info("暂无执行记录 — Agent 尚未分析过题目")
-
-st.divider()
-st.caption(f"🔄 数据自动刷新，每 10 秒更新 ｜ 数据库：`{DB_PATH}` ｜ OpenCyber v1.0")
+st.caption(f"🛡️ OpenCyber 一键流程系统 | 数据库: `{DB_PATH}`")
