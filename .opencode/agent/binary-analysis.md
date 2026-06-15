@@ -21,14 +21,27 @@
 [INFO] 架构: x86/ARM/MIPS/...
 ```
 
-必须执行的命令（按顺序）：
+必须执行的命令（按顺序）—— **自动判断环境，Windows 下用 WSL：**
+
 ```bash
-file <目标>
-strings <目标> | head -50
-strings -e L <目标> | head -30       # UTF-16 字符串
-xxd <目标> | head -20                 # 文件头魔数
-readelf -h <目标>                     # ELF 头信息（如适用）
-objdump -f <目标>                     # 文件头部摘要
+# Windows 环境检测
+where wsl 2>nul && set WSL_AVAIL=1 || set WSL_AVAIL=0
+
+# 所有 file/readelf/objdump 等 Linux 工具，一律通过 WSL 执行
+# 路径自动转换：E:\xxx → /mnt/e/xxx
+wsl file /mnt/e/path/to/file
+wsl strings /mnt/e/path/to/file | head -50
+wsl strings -e L /mnt/e/path/to/file | head -30
+wsl xxd /mnt/e/path/to/file | head -20
+wsl readelf -h /mnt/e/path/to/file
+wsl objdump -f /mnt/e/path/to/file
+```
+
+路径转换规则：`X:\路径` → `/mnt/x/路径`（盘符小写，反斜杠变正斜杠）。
+
+如果 WSL 不可用（`where wsl` 失败），则用 Python elftools 替代：
+```bash
+python -c "from elftools.elf.elffile import ELFFile; import sys; f=ELFFile.from_filename(sys.argv[1]); print('ELF:', f.elf_class, f.elf_endian); [print(s.name, hex(s.sh_addr), hex(s.sh_size)) for s in f.iter_sections()]" "E:\目标文件"
 ```
 
 输出格式：
@@ -50,34 +63,35 @@ objdump -f <目标>                     # 文件头部摘要
 在执行任何操作前，确认所需工具和依赖是否就绪：
 
 ```bash
-# 基础工具
-which file strings xxd objdump readelf 2>/dev/null
-# 逆向工具
-which gdb radare2 ltrace strace 2>/dev/null
-# 脚本环境
-python3 --version 2>/dev/null
-# WSL 检测（Windows 环境）
-which wsl wsl.exe 2>/dev/null | head -3
-# 其他
-which unzip tar 7z 2>/dev/null
+# 检查 WSL（Windows 下必须）
+where wsl 2>nul && wsl --version
+# 检查 Python 备选方案
+python --version 2>nul
+pip show pyelftools 2>nul || echo "pyelftools not installed"
 ```
 
-**Windows + WSL 处理逻辑：**
-如果检测到运行在 Windows 环境（如 `which file` 无结果），但存在 WSL：
+**关键规则：** 在 Windows 上，**不要直接执行** `file`/`readelf`/`objdump`/`strings`/`xxd`/`gdb`。这些 Linux 工具在 Windows 上不存在，直接执行会产生杂乱报错。
+正确做法是始终通过 WSL 执行：
 
-1. 优先尝试通过 WSL 执行 Linux 工具：`wsl file <目标（WSL路径）>`
-2. 需要将 Windows 路径转换为 WSL 路径：`wsl wslpath "C:\xxx"` 或手动映射 `/mnt/c/xxx`
-3. GDB、objdump、readelf 等 Linux 逆向工具都在 WSL 中运行
-4. 编辑/查看代码等操作仍在 Windows 侧进行
+```bash
+# ✅ 正确姿势
+wsl file /mnt/e/path/to/file
 
-示例路径转换：
-```
-[WSL] Windows 路径: D:\OpenCyber\challenge.exe
-[WSL] WSL 路径:     /mnt/d/OpenCyber/challenge.exe
-[WSL] 执行命令:     wsl file /mnt/d/OpenCyber/challenge.exe
+# ❌ 错误姿势（禁止）
+file E:\path\to\file
 ```
 
-如果 WSL 也未安装，提示用户安装或使用 Windows 原生工具（x64dbg、IDA Free 等）。
+**自动环境适配逻辑：**
+1. `where wsl` 成功 → 所有 Linux 命令通过 `wsl xxx` 执行，路径转 `/mnt/x/xxx`
+2. `where wsl` 失败但 `python` 可用 → 用 Python `pyelftools` 替代 readelf，用 `pip install pwntools` 补工具
+3. 两者都不可用 → 提示用户安装 WSL 或 scoop install 对应工具
+
+Windows 路径转 WSL 路径（内置函数逻辑）：
+```
+输入: D:\OpenCyber\a.elf
+输出: /mnt/d/OpenCyber/a.elf
+规则: 盘符小写 → /mnt/盘符/ + 反斜杠转正斜杠
+```
 
 环境检查输出格式：
 ```
