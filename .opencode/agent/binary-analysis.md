@@ -776,17 +776,48 @@ echo "TASK_ID=$TASK_ID"
 
 ---
 
-## 🌐 CTFd 平台对接
+## 🌐 基准测试 / CTFd 平台对接
 
-验收时需要自动对接 CTFd 平台：登录 → 列题 → 下载附件 → 提交 flag。
+### 本地基准测试模式（默认）
 
-### API 操作
+本地已准备了 18 道 benchmark 题目，存放在 `E:\知识产物(必保存)\课设\基准测试\逆向\`，配置文件和数据库路径如下：
 
 ```bash
-# CTFd 地址和账号（用户提供）
-CTFD_URL="http://192.168.x.x:8000"
-CTFD_USER="your_team_name"
-CTFD_PASS="your_password"
+# 配置和数据库
+BENCHMARK_DIR="E:/知识产物(必保存)/课设/基准测试/逆向"
+CONFIG="E:/知识产物(必保存)/课设/数据库/benchmark-config.json"
+DB="E:/知识产物(必保存)/课设/数据库/opencyber.db"
+SQLITE3='D:\sqlite\sqlite3.exe'
+```
+
+当用户说"跑基准测试"时，按以下顺序执行：
+
+```
+1. 从 samples 表读取所有 source='benchmark' 的题目（已注册 18 道）
+2. 按 difficulty 分组：basic(2) → medium(12) → hard(4)
+3. 逐个执行 4 阶段分析流程
+4. 每道题结果写入 tasks / tool_calls / observations / results 表
+5. 全部完成后输出评测统计：
+
+   "/d/sqlite/sqlite3" "$DB" "
+   SELECT s.difficulty,
+          COUNT(*) as total,
+          SUM(CASE WHEN t.result='success' THEN 1 ELSE 0 END) as solved,
+          ROUND(AVG(CASE WHEN t.result='success' THEN 1.0 ELSE 0.0 END)*100,2) as rate
+   FROM tasks t JOIN samples s ON t.sample_id=s.id
+   WHERE s.source='benchmark'
+   GROUP BY s.difficulty;"
+```
+
+### CTFd 远程模式（可选）
+
+当用户提供了 CTFd 服务器地址和账号时，走远程对接流程：
+
+```bash
+# CTFd 地址和账号（用户提供，填在 benchmark-config.json 中）
+CTFD_URL=""    # 例如 "http://192.168.x.x:8000"
+CTFD_USER=""
+CTFD_PASS=""
 
 # 1. 登录获取 Token
 TOKEN=$(curl -s -X POST "$CTFD_URL/api/v1/users/login" \
@@ -803,48 +834,25 @@ for c in data:
     print(f\"ID:{c['id']}  {c['name']}  [{c['category']}]  {c['value']}pts\")
 "
 
-# 3. 查看单题详情（获取附件信息）
-CHAL_ID=1
-curl -s -H "Authorization: Bearer $TOKEN" "$CTFD_URL/api/v1/challenges/$CHAL_ID" | \
-  python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print(json.dumps(d,indent=2))" 2>/dev/null
-
-# 4. 下载附件
+# 3. 下载附件
 curl -s -OJ -H "Authorization: Bearer $TOKEN" "$CTFD_URL/api/v1/challenges/$CHAL_ID/files"
-# 如果上一步返回文件列表，拼接 URL 下载
-curl -s -OJ -H "Authorization: Bearer $TOKEN" "$CTFD_URL$FILE_URL"
 
-# 5. 提交 flag
-SUBMIT_FLAG="flag{xxx}"
+# 4. 提交 flag
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"challenge_id\":$CHAL_ID,\"submission\":\"$SUBMIT_FLAG\"}" \
+  -d "{\"challenge_id\":$CHAL_ID,\"submission\":\"$FLAG\"}" \
   "$CTFD_URL/api/v1/challenges/attempt" | \
   python3 -c "import sys,json; r=json.load(sys.stdin); print(r['data']['message'])"
 ```
 
-### 对接流程
-
-当用户说"帮我从 CTFd 上做题"时，按以下顺序执行：
+**对接流程（远程模式）：**
 
 ```
-1. 向用户询问 CTFd 地址、用户名、密码
+1. 从 benchmark-config.json 读取 CTFd 配置
 2. 登录 → 获取 Token（记录到数据库 tool_calls）
 3. 列题 → 展示给用户看，让用户选择要做哪道
 4. 下载题目附件到本地（记录到 samples 表）
 5. 执行 4 阶段分析流程
 6. 拿到 flag 后自动提交到 CTFd（记录到 results 表）
 7. 输出结果
-```
-
-### 评测比赛模式
-
-当进入验收评测环节时，自动批量模式：
-
-```
-1. 登录 CTFd
-2. 列出所有题目
-3. 按难度分组（基础/中等/挑战）
-4. 逐个下载并分析
-5. 每解出一道立即提交
-6. 全部完成后输出评测统计（从数据库读回）
 ```
