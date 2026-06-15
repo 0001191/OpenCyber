@@ -15,6 +15,17 @@ This skill teaches the binary-analysis agent how to **drive GDB as a first-class
 
 Always run a quick detection before any GDB call. Output the result, then commit to one path for the rest of the session.
 
+### Try-before-build checklist（每次 GDB 会话前过一遍）
+
+```
+□ 遇到反调试/抗阻？→ 先查 GDB 是否有原生命令搞定（set follow-fork-mode / catch syscall / return 0）
+□ 要写多行脚本？→ 用 Write 工具创建文件，不用 heredoc
+□ 这一轮只验证一个假设？→ 是，不要在一轮 GDB 调用里塞 5 个不相关的问题
+□ 这段代码解决的是眼前的问题？→ 是，不预判"万一"的场景
+```
+
+全部打勾再动手指。
+
 ```bash
 # ── Local (Windows) ──
 which gdb                       # expect: /d/gcc/w64devkit/bin/gdb
@@ -45,48 +56,50 @@ wsl gdb --version | head -1
 
 Drive letter → lowercase, backslash → forward slash, prepend `/mnt/`. If you need it the other way: `wsl wslpath -w /mnt/d/ctf/a.elf`.
 
-### Avoid quoting hell
+### Avoid quoting hell: Write files, not heredocs
 
-PowerShell mangles `$`, double quotes, and backticks when calling `wsl gdb -ex "..."`. Three escape patterns that always work:
+**Never pass multi-line code through shell quoting.** PowerShell mangles `$`, double quotes, and backticks; bash heredocs in nested shells lose context; and debugging quoting errors takes longer than writing a file. The universal rule:
 
-```bash
-# Pattern A: heredoc to wsl bash
-wsl bash << 'GDB_SCRIPT'
-cd /mnt/d/ctf
-gdb -batch -nx \
-  -ex "file ./challenge" \
-  -ex "set pagination off" \
-  -ex "info functions" \
-  -ex "disas main" \
-  ./challenge
-GDB_SCRIPT
+> Needs more than 1 line? → **Write it as a file first.**
 
-# Pattern B: GDB command file (-x)
-cat > /tmp/cmds.gdb << 'EOF'
-file /mnt/d/ctf/challenge
-set pagination off
-b *0x401234
-r
-info registers
-x/8gx $rsp
-quit
-EOF
-wsl gdb -batch -nx -x /tmp/cmds.gdb /mnt/d/ctf/challenge
+Two patterns that always work:
 
-# Pattern C: pwntools (when installed in WSL)
-wsl python3 - << 'PY'
-from pwn import *
-context.log_level = 'info'
-p = process('/mnt/d/ctf/challenge')
-gdb.attach(p, '''
+**Pattern A: Write GDB command file with the IDE tool, then execute**
+
+```
+Step 1: Use the Write tool to create /tmp/cmds.gdb with content:
+  file /mnt/d/ctf/challenge
+  set pagination off
   b *0x401234
-  c
-''')
-p.interactive()
-PY
+  r
+  info registers
+  quit
+
+Step 2: Execute
+  wsl gdb -batch -nx -x /tmp/cmds.gdb
 ```
 
-> **Always use `-batch -nx -ex "set pagination off"`** for non-interactive runs. `-batch` exits when commands finish; `-nx` skips `~/.gdbinit` (avoids the user's pwndbg/gef TUI hijacking the session); `set pagination off` prevents `--More--` blocks.
+**Pattern B: Write a standalone script, then execute**
+
+```
+Step 1: Use the Write tool to create /tmp/solve.py or /tmp/hook.c
+Step 2: Copy to WSL and run
+  wsl cp /mnt/d/.../tmp_hook.c /tmp/hook.c
+  wsl gcc -shared -fPIC -o /tmp/hook.so /tmp/hook.c
+```
+
+**Pattern C (short commands only): Use `-ex` to chain, no heredoc needed**
+
+```bash
+wsl gdb -batch -nx \
+  -ex "set pagination off" \
+  -ex "file /mnt/d/ctf/challenge" \
+  -ex "info functions" \
+  -ex "disas main" \
+  /mnt/d/ctf/challenge
+```
+
+> `-batch -nx -ex "set pagination off"` starts every session. `-batch` exits when commands finish; `-nx` skips `~/.gdbinit` (avoids the user's pwndbg/gef TUI hijacking the session); `set pagination off` prevents `--More--` blocks.
 
 ---
 
@@ -215,6 +228,25 @@ shell ls                run shell command
 python print(1+1)       Python REPL (if compiled with python)
 ```
 
+### GDB 最小行动法则（防过度设计）
+
+```
+  遇到问题
+     │
+     ▼
+  GDB 有内置命令吗？  ──有──→ 一行 -ex 搞定，不写脚本
+     │ 没有
+     ▼
+  写 GDB 命令文件 (< 10 行)  ──行──→ Write → -x 执行
+     │ 不够
+     ▼
+  写 Python/C 脚本 (LD_PRELOAD)  ← 最后手段
+```
+
+- **3 条 GDB 命令以内**：直接 `-ex` 串联，不另建文件
+- **3-10 条命令**：Write 写 `.gdb` 文件，`-x` 执行
+- **超过 10 条或需要条件逻辑**：用 Python/pwntools 写独立脚本
+
 ---
 
 ## 3. CTF Playbooks (the 5 patterns that solve 80% of problems)
@@ -328,19 +360,59 @@ gdb -batch -nx -ex "set pagination off" \
 - WOW64 binaries (32-bit on 64-bit) work; use `set architecture i386` if auto-detect fails.
 - For anti-debug checks like `IsDebuggerPresent`, `b kernel32!IsDebuggerPresent` → modify return to 0 in the MI-style way (or patch the IAT).
 
-## 6. Anti-anti-debug (in priority order)
+## 6. Anti-anti-debug (GDB built-ins FIRST, LD_PRELOAD last)
 
-| Trick | Symptom | Fix |
-|-------|---------|-----|
-| `ptrace(PTRACE_TRACEME, ...)` | tracee attaches to parent, refuses to run under debugger | catch syscall ptrace; `return 0` |
-| `IsDebuggerPresent` | returns 1 → program branches to dead code | b `IsDebuggerPresent`; `set $rax = 0` |
-| `CheckRemoteDebuggerPresent` | same | same pattern |
-| `NtQueryInformationProcess(ProcessDebugPort)` | same | catch syscall; nop the check |
-| Timing checks (`rdtsc` diff) | time delta too small → exit | patch the JCC after the cmp |
-| `INT 2D` / `INT 3` traps | debugger swallows, normal flow continues | `b *AFTER_TRAP`; or pass through with `set $pc += 1` |
-| `IsProcessorFeaturePresent(PF_FASTFAIL)` / `__fastfail` | crashes on debug | same as INT 2D |
+遇到反调试时，按以下顺序尝试，**不要跳过前两步直接写 hook**：
 
-Always **try the cheapest countermeasure first** (single breakpoint + register poke). Only escalate to full LD_PRELOAD hooks if 3+ pokes fail.
+### 第 0 步：确认问题（1 条 GDB 命令就能验证）
+
+```bash
+# fork 问题——只跑一次就知道
+gdb -batch -nx -ex "set pagination off" \
+    -ex "file ./challenge" \
+    -ex "set follow-fork-mode parent" \
+    -ex "r" ./challenge
+
+# ptrace 反调试——catch 到了就是它
+gdb -batch -nx -ex "set pagination off" \
+    -ex "file ./challenge" \
+    -ex "catch syscall ptrace" \
+    -ex "r" ./challenge
+```
+
+如果上面跑通了，**不要写 hook**，直接用这个方案继续分析。
+
+### 第 1 步：GDB 内置绕过（一行命令，不写代码）
+
+| Trick | GDB 解决方案 |
+|-------|-------------|
+| `fork()` 后父进程无法 attach 子进程 | `set follow-fork-mode parent`（跟踪父进程）/ `set follow-fork-mode child`（跟踪子进程） |
+| `ptrace(PTRACE_TRACEME, ...)` | `catch syscall ptrace` → 命中后 `return 0` |
+| `IsDebuggerPresent` | `b IsDebuggerPresent` → `set $rax = 0` |
+| `CheckRemoteDebuggerPresent` | 同上模式 |
+| `NtQueryInformationProcess(ProcessDebugPort)` | `catch syscall` → nop 检查条件跳转 |
+| Timing checks (`rdtsc` diff) | patch the JCC after the cmp |
+| `INT 2D` / `INT 3` traps | `b *AFTER_TRAP` 跳过；或 `set $pc += 1` 绕过 |
+| `IsProcessorFeaturePresent(PF_FASTFAIL)` / `__fastfail` | 同 INT 3 处理 |
+
+### 第 2 步：GDB 命令行文件（超过 3 条命令时用）
+
+```bash
+# Write 工具创建 /tmp/anti.gdb
+#   file ./challenge
+#   set pagination off
+#   set follow-fork-mode parent
+#   catch syscall ptrace
+#   r
+#   info registers
+#   quit
+
+gdb -batch -nx -x /tmp/anti.gdb ./challenge
+```
+
+### 第 3 步：LD_PRELOAD / 自定义 hook（最后手段）
+
+如果 GDB 内置方案全部失败（例如壳在内存中 patched GOT entry，或使用了 `PTRACE_PEEKUSER` 等非常规 ptrace 请求），才退到 LD_PRELOAD。**写 LD_PRELOAD 时也只解决眼前问题，不要预判"以防万一"的各种场景。**
 
 ## 7. Output hygiene
 
@@ -434,43 +506,42 @@ gdb -batch -nx -ex "set pagination off" \
     ./CHALLENGE
 ```
 
-### T3: WSL ELFGDB (when target is Linux ELF)
+### T3: WSL ELF (write GDB script file first)
 
 ```bash
-wsl bash << 'GDB'
-gdb -batch -nx -ex "set pagination off" \
-    -ex "file /mnt/d/ctf/CHALLENGE" \
-    -ex "info functions" \
-    -ex "disas main" \
-    /mnt/d/ctf/CHALLENGE
-GDB
+# Step 1: Write /tmp/explore.gdb with:
+#   file /mnt/d/ctf/CHALLENGE
+#   set pagination off
+#   info functions
+#   disas main
+#   quit
+
+# Step 2: Execute
+wsl gdb -batch -nx -x /mnt/d/ctf/tmp/explore.gdb
 ```
 
-### T4: WSL GDB + Python script (for complex checks)
+### T4: WSL gdb command file (for multi-step analysis)
 
 ```bash
-wsl bash << 'GDB'
-python3 - << 'PY'
-import gdb  # works only if GDB built with python
-gdb.execute("set pagination off")
-gdb.execute("file /mnt/d/ctf/CHALLENGE")
-gdb.execute("info functions")
-PY
-gdb -batch -nx /mnt/d/ctf/CHALLENGE
-GDB
+# Step 1: Write /tmp/step.gdb
+#   file /mnt/d/ctf/CHALLENGE
+#   set pagination off
+#   b *0x401234
+#   r
+#   info registers rax rdi rsi
+#   x/32gx $rsp
+#   quit
+
+# Step 2: Execute
+wsl gdb -batch -nx -x /mnt/d/ctf/tmp/step.gdb
 ```
 
-### T5: pwntools + GDB attach (interactive exploitation)
+### T5: Python standalone script (for complex logic)
 
 ```bash
-wsl python3 - << 'PY'
-from pwn import *
-context.binary = '/mnt/d/ctf/CHALLENGE'
-p = process(context.binary.path)
-# gdb.attach(p, 'b *main\nc')  # manual; only with display
-print(p.recvline())
-p.close()
-PY
+# Step 1: Write /tmp/solve.py with the pwntools/GDB logic
+# Step 2: Copy to WSL and run
+wsl python3 /mnt/d/path/to/solve.py
 ```
 
 ---
@@ -501,3 +572,6 @@ If any fails, the agent must fall back to static analysis or shell into WSL.
 - **Save transcripts to /tmp**, not the workspace. They're bulky and may contain the flag (sensitive).
 - **Use WSL for ELF** unless you have a strong reason. mingw GDB is fine for PE.
 - **Don't run untrusted binaries with the network up.** CTF binaries can be live malware; use a sandbox VM or `unshare -n` if available.
+- **Write files, not heredocs.** Multi-line scripts → Write tool first, execute second.
+- **GDB built-ins before LD_PRELOAD.** One `-ex` flag beats 30 lines of C hook.
+- **3-command rule.** If 3 GDB invocations on the same direction produce nothing, switch direction. Don't escalate complexity.

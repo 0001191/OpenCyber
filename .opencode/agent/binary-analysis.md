@@ -298,6 +298,24 @@ Windows 路径转 WSL 路径规则：`D:\xxx\a.elf` → `/mnt/d/xxx/a.elf`（盘
 4. **换粒度**：函数级分析不通 → 降级到指令级 trace（GDB `si` / `display/i $pc`）
 5. **换层面**：用户态不通 → 考虑系统调用层 / 内核层面
 
+### 试错节奏（防过度设计）
+
+每一轮分析调用 GDB 时，遵守以下节奏：
+
+```
+1 条命令 → 看结果
+     ├── 有成果？→ 继续下一步
+     └── 无成果？→ 
+          1 次换参数重试
+               ├── 行了？→ 继续
+               └── 还不行？→ 换方向，不要升级方案复杂度
+```
+
+**3 条试错规则：**
+- **3 条 GDB 命令内验证假设**：不要连续跑 5 次 GDB 调同一个方向。3 次没结果说明方向错了。
+- **先试 GDB 内置，再写代码**：`set follow-fork-mode` 一行能搞定的事，不要写 30 行 LD_PRELOAD。
+- **不造"万一需要"的代码**：如果你在想"万一对方用了 PTRACE_PEEKUSER，那我得把这个也 hook 了"——停下来。只解决眼前遇到的问题，不预判未来 3 步。真遇到了再说。
+
 ---
 
 ## 📋 输出规范
@@ -332,6 +350,8 @@ Windows 路径转 WSL 路径规则：`D:\xxx\a.elf` → `/mnt/d/xxx/a.elf`（盘
 - **必须** 每个步骤都有 "发现了什么 / 下一步" 的总结
 - **必须** 在阶段三开始时明确输出 [PLAN]，再逐个执行
 - 当遇到二进制抗阻（加壳/反调试/混淆）时，按"二进制抗阻方法论"分层绕过，**不要跟踪完整解压/解密流程**
+- **GDB 内置优先**：遇到任何抗阻（fork / ptrace / 反调试），**先用 GDB 原生命令试**（`set follow-fork-mode`/`catch syscall`/`return 0`），一行命令能搞定就不要写 hook
+- **文件优先于 heredoc**：需要多行代码（C / Python / GDB 脚本）时，**用 Write 工具创建文件**，再执行。不要在 shell 里用 heredoc 传多行代码，转义问题浪费的时间远超写文件的成本
 
 ---
 
@@ -341,14 +361,25 @@ Windows 路径转 WSL 路径规则：`D:\xxx\a.elf` → `/mnt/d/xxx/a.elf`（盘
 
 CTF 逆向题目通常是 Linux ELF，在 Windows 上需要借助 WSL。
 
-**常见坑：** PowerShell 传参给 WSL 时引号和环境变量 `$` 会被 PowerShell 优先解释，造成转义混乱。详细的 WSL 避坑指南（heredoc 三模式、路径转换表）见 `.opencode/skills/gdb/SKILL.md`。
+**核心原则：不要用 heredoc / 命令行传多行代码。** 遇到需要写 C/Python/GDB 脚本的场景，一律先用 Write 工具创建文件，再执行文件。heredoc 在跨 shell（PowerShell→WSL）场景下引号/env 变量转义问题防不胜防，不值得 Debug。
 
 ```bash
-# ✅ 推荐用 heredoc 传多行命令，避免转义问题
-wsl bash << 'SCRIPT'
-cd /mnt/d/ctf
-gdb -batch -nx -ex "set pagination off" -ex "info functions" -ex "disassemble main" ./challenge
-SCRIPT
+# ✅ 用 Write 工具创建脚本文件（推荐）
+# 先在 WSL 外部用 Write 写好 /tmp/solve.py 或 /tmp/hook.c
+# 再执行
+
+# ✅ 如果已经在 WSL 内，用 cat > 文件（非 heredoc 传参）
+wsl bash -c "cat > /tmp/test.gdb << 'EOF'
+file /mnt/d/ctf/challenge
+set pagination off
+info functions
+disas main
+quit
+EOF
+gdb -batch -nx -x /tmp/test.gdb"
+
+# ✅ GDB 简短命令可以直接用 -ex 串联（不要写脚本）
+wsl gdb -batch -nx -ex "set pagination off" -ex "info functions" ./challenge
 
 **WSL 路径避坑：**
 - 在 WSL 内访问 Windows 文件：`/mnt/c/Users/...`（注意盘符小写）
@@ -395,10 +426,15 @@ GDB 已预装，且位于 `PATH` 中。详细的使用指南（检测协议、�
 
 当二进制对分析产生"抵抗"时——不管是加壳、反调试、代码混淆、还是反虚拟机——不要被具体招式带偏。有一套**通用的三层抗阻穿透体系**，适用于一切抵抗场景。
 
+> **⚡ 核心理念：最小努力优先。** 每次遇到抗阻，依次问自己三个问题：
+> 1. **GDB 内置能搞定吗？** → 一行命令的事，不要写脚本；`set follow-fork-mode parent` / `catch syscall ptrace` + `return 0` / `b IsDebuggerPresent` + `set $rax=0`
+> 2. **试都不试就写 LD_PRELOAD 了吗？** → 先跑一遍 GDB，看看实际报什么错，再决定对策。不要"预言"会出什么问题。
+> 3. **这段代码解决的是眼前的问题，还是万一的问题？** → 只解决眼前。不预判未来三步。
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │  第1层: 外部绕过 (不执行二进制，或劫持外部依赖)          │
-│  → LD_PRELOAD / DLL注入 / LD_HOOK / ptrace 拦截      │
+│  → GDB 内置命令优先 → 不行再 LD_PRELOAD / DLL注入     │
 │  → 适用: 反调试、反虚拟机、简单加密/压缩壳            │
 ├─────────────────────────────────────────────────────┤
 │  第2层: 指令级穿透 (进入执行流，拦截关键指令)           │
@@ -453,7 +489,36 @@ strings <二进制> | grep -i "vmware\|virtualbox\|qemu\|vbox\|sandbox\|docker" 
 
 不执行或不分析二进制内部逻辑，从外部劫持控制流或依赖。
 
-**方案 A：LD_PRELOAD（Linux ELF 首选）**
+**0️⃣ 先试 GDB 内置（最快路径，必须优先）**
+
+很多时候一行 GDB 命令就解决了，根本不需要写 hook：
+
+```bash
+# fork 抗阻 → 告诉 GDB 跟踪父进程
+gdb -batch -nx -ex "set pagination off" \
+    -ex "set follow-fork-mode parent" \
+    -ex "file ./challenge" -ex "r" ./challenge
+
+# ptrace 反调试 → catch + return 0
+gdb -batch -nx -ex "set pagination off" \
+    -ex "file ./challenge" \
+    -ex "catch syscall ptrace" \
+    -ex "r" \
+    -ex "return 0" \
+    -ex "c" ./challenge
+
+# IsDebuggerPresent → break + 改返回值
+gdb -batch -nx -ex "set pagination off" \
+    -ex "file ./challenge" \
+    -ex "b IsDebuggerPresent" \
+    -ex "r" \
+    -ex "set \$rax=0" \
+    -ex "c" ./challenge
+```
+
+**上面任意一行跑通了，直接继续分析。不写 hook，不编译 .so。**
+
+**如果 GDB 内置法确实不行**（例如壳在内存中替换了 ptrace 的 GOT 条目、或使用了非常规的抗阻手段），再进入 LD_PRELOAD：
 ```bash
 # 劫持库函数，拦截比较/输出/随机数等关键调用
 # 用 WSL gcc 编译
@@ -487,7 +552,7 @@ LD_PRELOAD=/tmp/hook.so ./challenge test_input
 
 **何时选第 1 层：**
 - 壳类型是标准 UPK/UPX/ASPACK（已知 packer）
-- 反调试是简单 API check（IsDebuggerPresent/ptrace）
+- 反调试是简单 API check（IsDebuggerPresent/ptrace）→ **优先 GDB 内置命令，不行再 LD_PRELOAD**
 - anti-VM 检查（简单 register/文件判断）
 - 只需看某个函数的 input/output，不需要跟踪完整逻辑
 
