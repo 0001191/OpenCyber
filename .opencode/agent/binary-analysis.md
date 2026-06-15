@@ -176,8 +176,45 @@ Windows 路径转 WSL 路径规则：`D:\xxx\a.elf` → `/mnt/d/xxx/a.elf`（盘
 |---------|------|
 | 1 次 | 换一种分析思路 |
 | 2 次 | 切换工具链（如 objdump → gdb → Python 脚本） |
-| 3 次 | 重新做阶段一，检查是否遗漏了关键信息 |
-| 4+ 次 | 上报当前所有已尝试方向，向用户请求提示 |
+| 3 次 | **止损判断**：评估当前题目是否值得继续投入，必要时跳过 |
+| 4+ 次 | 记录失败路径后跳过该题，切到下一道更容易的 |
+
+### 止损规则（重要）
+
+不要在一道题上无限消耗。超过以下阈值必须主动止损：
+
+| 指标 | 阈值 | 动作 |
+|------|------|------|
+| 工具调用次数 | > 15 次 | 输出 [STOPLOSS]，记录失败，跳过此题 |
+| 连续方向切换 | 3 次无进展 | 说明当前思路不对，标记后跳过 |
+| 单工具重试 | 同一命令失败 > 3 次 | 换工具，不要反复试同一个 |
+
+止损输出格式：
+```
+[STOPLOSS] 题目: xxx 超过止损阈值
+  工具调用: 18 次 / 方向切换: 4 次
+  已尝试: strings → readelf → objdump → GDB → angr
+  关键障碍: UPX 壳被修改，upx -d 无法解，手动跟踪解压流程过于复杂
+  建议: patch 壳校验直接跳 OEP，或跳过此题先做容易的
+```
+
+**核心原则：改壳题不要跟踪完整解压流程。** 正确做法是：
+1. 用 `readelf -S` 或 `xxd` 找原始 OEP（可从节表或 EP 段规律推断）
+2. 直接 patch 二进制：把壳入口的 jmp 改成跳向推测的 OEP
+3. 或用 `LD_PRELOAD` hook 关键函数，绕过壳逻辑直接拿明文
+
+### 策略优先级：先易后难
+
+分析多道题时，按以下顺序处理：
+
+```
+优先级 1: 基础题 — 普通 ELF，strings / objdump 就有 flag
+优先级 2: 中等题 — 需要反编译 + 动态调试
+优先级 3: 改壳题 — 先尝试 patch / LD_PRELOAD，不行就跳过
+优先级 4: 反调试 — 最后攻坚
+```
+
+**永远不要用一道改壳题耗光所有时间和预算。** 每道题开始前先评估难度，判断是否值得投入。如果超过止损阈值，果断跳过做下一道。
 
 ### 失败复盘
 
@@ -251,21 +288,36 @@ Windows 路径转 WSL 路径规则：`D:\xxx\a.elf` → `/mnt/d/xxx/a.elf`（盘
 
 ### WSL 工具链
 
-CTF 逆向题目通常是 Linux ELF，在 Windows 上需要借助 WSL：
+CTF 逆向题目通常是 Linux ELF，在 Windows 上需要借助 WSL。
+
+**常见坑：** PowerShell 传参给 WSL 时引号和环境变量 `$` 会被 PowerShell 优先解释，造成转义混乱。解决方案：
 
 ```bash
-# 进入 WSL 环境执行单条命令
-wsl file /mnt/d/challenge
-wsl checksec --file=/mnt/d/challenge
+# ❌ 不要这样（引号容易丢）
+wsl gdb -ex "b *0x401234" ./challenge
 
-# 交互式进入 WSL
-wsl bash -c "cd /mnt/d/ctf && gdb ./challenge"
+# ✅ 用 heredoc 传多行命令，避免转义问题
+wsl bash << 'SCRIPT'
+cd /mnt/d/ctf
+file ./challenge
+strings ./challenge | head -30
+readelf -h ./challenge
+gdb -batch -nx -ex "info functions" -ex "disassemble main" ./challenge
+SCRIPT
 
-# 安装缺失工具（在 WSL 内）
-wsl sudo apt update -y
-wsl sudo apt install -y gdb python3-pip pwntools
-wsl pip3 install pwntools one-gadget
+# ✅ 或者写脚本到文件，在 WSL 内执行
+cat > /tmp/solve.py << 'EOF'
+from pwn import *
+elf = ELF('/mnt/d/challenge')
+print(elf.checksec())
+EOF
+wsl python3 /tmp/solve.py
 ```
+
+**WSL 路径避坑：**
+- 在 WSL 内访问 Windows 文件：`/mnt/c/Users/...`（注意盘符小写）
+- 在 PowerShell 传给 WSL 的路径：用单引号防止 PowerShell 解释 `$`
+- `wslpath` 命令可以自动转换路径格式
 
 常用 WSL 路径映射：
 | Windows 路径 | WSL 路径 |
@@ -304,6 +356,60 @@ disas main                       反汇编指定函数
 set $rax = 0                     修改寄存器
 patch long 0x401234 0x90909090   修改内存
 ────────────────────────────────────────
+```
+
+### 改壳题处理（优先于 GDB 调试）
+
+遇到 UPX / 自定义加壳的二进制，**不要跟踪完整解压流程**，以下方法更高效：
+
+**方法一：Patch 跳转 OEP**
+```bash
+# 1. 找原始入口点（OEP）
+# UPX 标准壳 OEP 特征：pushad → ... → popad → jmp OEP
+# 可以从节表规律推断，或从壳入口 + 偏移估算
+readelf -h ./challenge | grep "Entry point"
+
+# 2. 查看壳入口附近指令，找到跳向 OEP 的 jmp
+objdump -d ./challenge --start-address=0x$(readelf -h ./challenge | grep "Entry" | awk '{print $4}') | head -20
+
+# 3. 用 Python patch，将壳入口直接改为 jmp OEP（0xE9 为 near jmp）
+python3 -c "
+import struct
+with open('challenge', 'r+b') as f:
+    f.seek(0)  # 或从入口偏移开始
+    # jmp OEP: E9 [相对偏移 4字节]
+    oep = 0x401234  # 找到的真实 OEP
+    current_ep = 0x400000  # 当前入口
+    rel = oep - current_ep - 5
+    f.write(b'\\xe9' + struct.pack('<I', rel & 0xFFFFFFFF))
+print('Patched: entry -> OEP')
+"
+```
+
+**方法二：LD_PRELOAD hook**
+```bash
+# Hook strcmp/strlen/printf 等函数，直接拿到比较的明文
+cat > hook.c << 'EOF'
+#include <stdio.h>
+#include <string.h>
+int strcmp(const char *s1, const char *s2) {
+    printf("HOOK strcmp: '%s' vs '%s'\n", s1, s2);
+    return 0;  // 永远返回相等
+}
+EOF
+gcc -shared -fPIC -o hook.so hook.c
+LD_PRELOAD=./hook.so ./challenge
+```
+
+**方法三：Python pwntools 自动化**
+```python
+from pwn import *
+context.log_level = 'debug'
+p = process('./challenge')
+# 自动交互、发送输入、接收输出
+p.sendline(b'A' * 32)
+resp = p.recvall()
+print(resp)
 ```
 
 CTF 专项技巧：
