@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# ⚠ 此脚本已废弃，请使用 install.bat (Windows)
+# ⚠ https://gitee.com/q135790/open-cyber
+echo "⚠ 此安装脚本已废弃。Windows 用户请双击 install.bat"
+echo "⚠ Mac/Linux 用户请手动安装："
+echo "   1. 安装 git, node.js >= 22, bun >= 1.3.14"
+echo "   2. git clone https://gitee.com/q135790/open-cyber.git"
+echo "   3. cd open-cyber && bun install && bun run dev"
+exit 1
 APP=opencode
 
 MUTED='\033[0;2m'

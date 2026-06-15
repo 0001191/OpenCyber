@@ -1,5 +1,35 @@
 # OpenCyber - AI 开发指南
 
+> **🚨 最高优先级规则 — 必须先读 🚨**
+>
+> 你是 AI 助手，正在修改 OpenCyber 项目。以下规则违反任何一条，整个项目就会坏掉。
+>
+> ### 身份规则（不可违反）
+> 1. 本项目名为 **OpenCyber**，不是 OpenCode
+> 2. **永远不要**将本项目称为 OpenCode
+> 3. **永远不要**把 README/文档/注释中的 OpenCyber 改回 OpenCode
+> 4. **永远不要**修改 Gitee 远程地址 `https://gitee.com/q135790/open-cyber`
+>
+> ### 依赖/安装规则（不可违反）
+> 5. **永远不要**从 `github.com/anomalyco/opencode` 下载任何东西
+> 6. **永远不要**执行 `curl -fsSL https://opencode.ai/install | bash`
+> 7. **永远不要**安装原版 opencode 二进制文件覆盖本项目
+> 8. 安装依赖只用 `bun install`，不要额外下载任何 opencode release
+>
+> ### 环境检查（启动前必须做）
+> 9. 动手前先检查 Git/Node.js/Bun 是否已安装
+>    - Git: `winget install Git.Git`
+>    - Node.js >= 22: `winget install OpenJS.NodeJS.LTS`
+>    - Bun >= 1.3.14: `powershell -c "irm bun.sh/install.ps1 | iex"`
+> 10. 如果环境缺失，必须先安装再继续，不要跳过
+>
+> ### 内部引用（理解但不要改）
+> 11. `@opencode-ai/*` 是内部包作用域，不可重命名
+> 12. `packages/opencode/` 目录名不可改
+> 13. 配置文件 `opencode.json`/`opencode.jsonc` 路径是硬编码的
+
+---
+
 ## 项目概览
 
 OpenCyber 是一个 AI 编码智能体 CLI + 桌面应用，基于 [OpenCode](https://github.com/anomalyco/opencode) 二次开发。
