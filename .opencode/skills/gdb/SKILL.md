@@ -15,17 +15,6 @@ This skill teaches the binary-analysis agent how to **drive GDB as a first-class
 
 Always run a quick detection before any GDB call. Output the result, then commit to one path for the rest of the session.
 
-### Try-before-build checklist（每次 GDB 会话前过一遍）
-
-```
-□ 遇到反调试/抗阻？→ 先查 GDB 是否有原生命令搞定（set follow-fork-mode / catch syscall / return 0）
-□ 要写多行脚本？→ 用 Write 工具创建文件，不用 heredoc
-□ 这一轮只验证一个假设？→ 是，不要在一轮 GDB 调用里塞 5 个不相关的问题
-□ 这段代码解决的是眼前的问题？→ 是，不预判"万一"的场景
-```
-
-全部打勾再动手指。
-
 ```bash
 # ── Local (Windows) ──
 which gdb                       # expect: /d/gcc/w64devkit/bin/gdb
@@ -231,22 +220,6 @@ python print(1+1)       Python REPL (if compiled with python)
 ### GDB 最小行动法则（防过度设计）
 
 ```
-  遇到问题
-     │
-     ▼
-  GDB 有内置命令吗？  ──有──→ 一行 -ex 搞定，不写脚本
-     │ 没有
-     ▼
-  写 GDB 命令文件 (< 10 行)  ──行──→ Write → -x 执行
-     │ 不够
-     ▼
-  写 Python/C 脚本 (LD_PRELOAD)  ← 最后手段
-```
-
-- **3 条 GDB 命令以内**：直接 `-ex` 串联，不另建文件
-- **3-10 条命令**：Write 写 `.gdb` 文件，`-x` 执行
-- **超过 10 条或需要条件逻辑**：用 Python/pwntools 写独立脚本
-
 ---
 
 ## 3. CTF Playbooks (the 5 patterns that solve 80% of problems)
@@ -360,29 +333,20 @@ gdb -batch -nx -ex "set pagination off" \
 - WOW64 binaries (32-bit on 64-bit) work; use `set architecture i386` if auto-detect fails.
 - For anti-debug checks like `IsDebuggerPresent`, `b kernel32!IsDebuggerPresent` → modify return to 0 in the MI-style way (or patch the IAT).
 
-## 6. Anti-anti-debug (GDB built-ins FIRST, LD_PRELOAD last)
+## 6. Anti-anti-debug: GDB capabilities reference
 
-遇到反调试时，按以下顺序尝试，**不要跳过前两步直接写 hook**：
+GDB 能处理哪些反调试场景，以下是一份能力清单。至于什么时候用哪条——交给逆向分析通用方法论判断。
 
-### 第 0 步：确认问题（1 条 GDB 命令就能验证）
-
-```bash
-# fork 问题——只跑一次就知道
-gdb -batch -nx -ex "set pagination off" \
-    -ex "file ./challenge" \
-    -ex "set follow-fork-mode parent" \
-    -ex "r" ./challenge
-
-# ptrace 反调试——catch 到了就是它
-gdb -batch -nx -ex "set pagination off" \
-    -ex "file ./challenge" \
-    -ex "catch syscall ptrace" \
-    -ex "r" ./challenge
-```
-
-如果上面跑通了，**不要写 hook**，直接用这个方案继续分析。
-
-### 第 1 步：GDB 内置绕过（一行命令，不写代码）
+| 抗阻类型 | GDB 能力 |
+|----------|---------|
+| `fork()` 后跟踪哪个进程 | `set follow-fork-mode parent` 或 `set follow-fork-mode child` |
+| `ptrace(PTRACE_TRACEME, ...)` 自跟踪 | `catch syscall ptrace` → 命中后 `return 0` |
+| `IsDebuggerPresent` | `b IsDebuggerPresent` → `set $rax = 0` |
+| `CheckRemoteDebuggerPresent` | 同上模式 |
+| `NtQueryInformationProcess(ProcessDebugPort)` | `catch syscall` → nop 检查条件跳转 |
+| 时序检测 (`rdtsc` diff) | patch JCC after cmp |
+| `INT 2D` / `INT 3` 陷阱 | `b *AFTER_TRAP`；或 `set $pc += 1` |
+| `__fastfail` | 同 INT 3
 
 | Trick | GDB 解决方案 |
 |-------|-------------|
@@ -408,11 +372,6 @@ gdb -batch -nx -ex "set pagination off" \
 #   quit
 
 gdb -batch -nx -x /tmp/anti.gdb ./challenge
-```
-
-### 第 3 步：LD_PRELOAD / 自定义 hook（最后手段）
-
-如果 GDB 内置方案全部失败（例如壳在内存中 patched GOT entry，或使用了 `PTRACE_PEEKUSER` 等非常规 ptrace 请求），才退到 LD_PRELOAD。**写 LD_PRELOAD 时也只解决眼前问题，不要预判"以防万一"的各种场景。**
 
 ## 7. Output hygiene
 
@@ -572,6 +531,3 @@ If any fails, the agent must fall back to static analysis or shell into WSL.
 - **Save transcripts to /tmp**, not the workspace. They're bulky and may contain the flag (sensitive).
 - **Use WSL for ELF** unless you have a strong reason. mingw GDB is fine for PE.
 - **Don't run untrusted binaries with the network up.** CTF binaries can be live malware; use a sandbox VM or `unshare -n` if available.
-- **Write files, not heredocs.** Multi-line scripts → Write tool first, execute second.
-- **GDB built-ins before LD_PRELOAD.** One `-ex` flag beats 30 lines of C hook.
-- **3-command rule.** If 3 GDB invocations on the same direction produce nothing, switch direction. Don't escalate complexity.
