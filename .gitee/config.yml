@@ -1,0 +1,12 @@
+default_branch: dev
+description: OpenCyber - AI 编码智能体
+private: true
+issue_templates:
+  - bug
+  - feature
+merge_method: merge
+pull_request:
+  enable_squash: false
+  enable_rebase: true
+  need_review: false
+  reviewers: []
