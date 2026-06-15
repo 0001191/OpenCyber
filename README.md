@@ -1,29 +1,30 @@
 <p align="center">
   <br/>
-  <img src="https://github.com/0001191/OpenCyber/raw/dev/packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCyber logo" width="420">
+  <img src="./packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCyber logo" width="420">
   <br/>
 </p>
 
 <p align="center">
-  <strong>下一代 AI 编码智能体 · 开源 · 可定制</strong>
+  <strong>AI 编码智能体 · 终端内智能编程 · 开源</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/0001191/OpenCyber/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/0001191/OpenCyber?style=flat-square" /></a>
   <a href="https://github.com/0001191/OpenCyber/actions"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/0001191/OpenCyber/publish.yml?style=flat-square&branch=dev" /></a>
+  <a href="https://gitee.com/q135790/open-cyber"><img alt="Gitee" src="https://img.shields.io/badge/Gitee-镜像-C71D23?style=flat-square" /></a>
 </p>
 
 ---
 
-## 快速开始
+## 🚀 快速开始
 
 ```bash
 git clone https://github.com/0001191/OpenCyber.git
 cd OpenCyber
 bun install
-bun link               # 全局注册 opencyber 命令
-bun run dev            # 启动开发模式
-opencyber              # 终端中启动 AI 编码智能体
+bun link
+bun run dev          # 启动开发模式
+opencyber            # 在终端中启动 AI 编码智能体
 ```
 
 ### 环境要求
@@ -36,51 +37,18 @@ opencyber              # 终端中启动 AI 编码智能体
 
 ---
 
-## 团队 AI 开发
+## 🤖 智能体
 
-OpenCyber 附带 `AGENT.md`，打开项目后 AI 编码工具（Cursor / Claude Code / Windsurf / GitHub Copilot 等）会自动读取，开箱即用。
+OpenCyber 内置两种智能体，按 `Tab` 键切换：
 
-```bash
-# 团队成员直接：
-git clone https://github.com/0001191/OpenCyber.git
-cd OpenCyber
-bun install
-opencyber
-```
-
-AI 工具会自动获得：
-- 项目结构概览
-- 技术栈细节（Bun + Effect + SolidJS + Electron）
-- 编码约定（Effect 模式、导入路径等）
-- 关键命令和构建方式
-
----
-
-## 桌面应用
-
-从 [Releases](https://github.com/0001191/OpenCyber/releases) 下载桌面版。
-
-| 平台 | 下载 |
+| 模式 | 说明 |
 |------|------|
-| macOS (Apple Silicon) | `opencyber-desktop-mac-arm64.dmg` |
-| macOS (Intel) | `opencyber-desktop-mac-x64.dmg` |
-| Windows | `opencyber-desktop-windows-x64.exe` |
-| Linux | `.deb` / `.rpm` / `.AppImage` |
+| **build** | 全权限开发智能体，可读写文件、执行命令 |
+| **plan** | 只读分析模式，探索代码、提供建议，执行命令前需确认 |
 
 ---
 
-## 智能体
-
-OpenCyber 内置两种智能体，`Tab` 键切换：
-
-- **build** — 全权限开发智能体
-- **plan** — 只读分析/代码探索智能体（禁止文件编辑，运行命令前会请求确认）
-
-另有 **general** 子智能体，通过 `@general` 调用。
-
----
-
-## 项目结构
+## 📁 项目结构
 
 ```
 OpenCyber/
@@ -98,10 +66,40 @@ OpenCyber/
 
 ---
 
-## 贡献
+## 💻 桌面应用
 
-欢迎提交 PR。请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+从 [Releases](https://github.com/0001191/OpenCyber/releases) 下载桌面版。
+
+| 平台 | 下载 |
+|------|------|
+| macOS (Apple Silicon) | `opencyber-desktop-mac-arm64.dmg` |
+| macOS (Intel) | `opencyber-desktop-mac-x64.dmg` |
+| Windows | `opencyber-desktop-windows-x64.exe` |
+| Linux | `.deb` / `.rpm` / `.AppImage` |
 
 ---
 
-**基于 [OpenCode](https://github.com/anomalyco/opencode) · 独立维护 · OpenCyber 团队**
+## 🤝 团队协作
+
+1. 将你的 Gitee 用户名告诉项目管理员
+2. 生成个人访问令牌：[设置 → 私人令牌](https://gitee.com/profile/personal_access_tokens)
+3. 克隆仓库并开始开发：
+
+```bash
+git clone https://gitee.com/q135790/open-cyber.git
+cd open-cyber
+bun install
+bun run dev
+```
+
+项目包含 `AGENT.md`，AI 编码工具（Cursor / Claude Code / Windsurf 等）打开即用，自动获得项目上下文。
+
+---
+
+## 贡献
+
+欢迎提交 Issue 和 PR。请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+
+---
+
+**OpenCyber 团队 · 开源 · MIT License**
